@@ -1,0 +1,8 @@
+[package]
+name = "bgp_nom"
+version = "0.1.0"
+authors = ["Kris Price <kris@krisprice.nz>"]
+
+[dependencies]
+nom = "^3.1.0"
+byteorder = "^1.0"
