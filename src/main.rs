@@ -9,6 +9,8 @@ use std::io::prelude::*;
 use std::io::Cursor;
 use std::path::Path;
 
+use std::net::Ipv4Addr;
+
 extern crate byteorder;
 use byteorder::{BigEndian, ReadBytesExt};
 
@@ -292,14 +294,25 @@ named!(parse_bgp_path_attribute<&[u8], BgpPathAttribute>,
     )
 );
 
-// Or... would this below be tidier?
+// Or... would this method below be tidier? It would seem (intuitively)
+// to be less efficient.
 
-#[derive(Debug)]
+#[derive(Debug,PartialEq)]
+enum PathAttribute {
+    Origin(Box<OriginAttribute>),
+    AsPath(Box<AsPathAttribute>),
+    NextHop(Box<NextHopAttribute>),
+    MultiExitDisc(Box<MultiExitDiscAttribute>),
+    LocalPref(Box<LocalPrefAttribute>),
+    AtomicAggregate,
+    Aggregator(Box<AggregatorAttribute>),
+}
+
+#[derive(Debug,PartialEq)]
 enum BgpOriginCode {
     Igp,
     Egp,
     Incomplete,
-    Unknown,
 }
 
 impl From<u8> for BgpOriginCode {
@@ -308,34 +321,136 @@ impl From<u8> for BgpOriginCode {
             0 => BgpOriginCode::Igp,
             1 => BgpOriginCode::Egp,
             2 => BgpOriginCode::Incomplete,
-            _ => BgpOriginCode::Unknown,
+            _ => unreachable!(),
         }
     }
 }
 
-trait NewBgpPathAttribute { }
-
-struct NewBgpPathAttributeOrigin {
+#[derive(Debug,PartialEq)]
+struct OriginAttribute {
     origin_code: BgpOriginCode,
 }
 
-impl NewBgpPathAttribute for NewBgpPathAttributeOrigin { }
-
-named!(new_parse_bgp_path_attribute_origin<&[u8], Box<NewBgpPathAttribute> >,
+named!(origin_attribute<&[u8], PathAttribute>,
     do_parse!(
-        //length: verify!(be_u8, |val:u8| val == 1) >>
-        //origin_code: verify!(take!(1), |val:u8| val >= 0 && val <= 2) >>    
-
-        tag!([0x40]) >> // flags should always be 0b1000
-        tag!([1u8]) >> // origin type code is 1
+        bits!(tag_bits!(u8, 8, 0b0100_0000)) >>
+        tag!([1u8]) >> // type code 1
         tag!([1u8]) >> // length should always be 1
-        value: take!(1) >>
-        (
-            Box::new(
-                NewBgpPathAttributeOrigin {
-                    origin_code: BgpOriginCode::from(1),
-                })
-        )
+        origin_code: be_u8 >>
+        (PathAttribute::Origin(Box::new(OriginAttribute { origin_code: BgpOriginCode::from(origin_code) })))
+    )
+);
+
+#[derive(Debug,PartialEq)]
+enum AsPathSegment {
+    AsSet(Vec<u16>),
+    AsSequence(Vec<u16>),
+}
+
+#[derive(Debug,PartialEq)]
+struct AsPathAttribute {
+    as_path: Vec<AsPathSegment>,
+}
+
+named!(as_set<&[u8], Vec<u16>>, preceded!(tag!([1u8]), length_count!(be_u8, be_u16)));
+named!(as_sequence<&[u8], Vec<u16>>, preceded!(tag!([2u8]), length_count!(be_u8, be_u16)));
+named!(as_path_segment_as_vec1<&[u8], Vec<u16>>, preceded!(alt!(tag!([1u8]) | tag!([2u8])), length_count!(be_u8, be_u16)));
+named!(as_path_segment_as_vec2<&[u8], Vec<u16>>, alt!(as_set | as_sequence));
+
+named!(as_path_segment<&[u8], AsPathSegment>,
+    do_parse!(
+        type_code: verify!(be_u8, |v: u8| v >= 1 && v <= 2) >> // TODO: or use alt!() or one_of!()?
+        seg: length_count!(be_u8, be_u16) >>
+        (match type_code {
+            1u8 => AsPathSegment::AsSet(seg),
+            2u8 => AsPathSegment::AsSequence(seg),
+            _ => unreachable!(),
+        })
+    )
+);
+
+named!(as_path_attribute<&[u8], PathAttribute>,
+    do_parse!(
+        bits!(tag_bits!(u8, 8, 0b0100_0000)) >>
+        tag!([2u8]) >> // as_path type code is 2
+        length: be_u8 >> // TODO: need to recognize extended length flag
+        as_path_segments: flat_map!(take!(length), complete!(many0!(as_path_segment))) >>
+        (PathAttribute::AsPath(Box::new(AsPathAttribute { as_path: as_path_segments })))
+    )
+);
+
+#[derive(Debug,PartialEq)]
+struct NextHopAttribute {
+    next_hop: Ipv4Addr,
+}
+
+named!(next_hop_attribute<&[u8], PathAttribute>,
+    do_parse!(
+        bits!(tag_bits!(u8, 8, 0b0100_0000)) >>
+        tag!([3u8]) >> // type code 3
+        tag!([4u8]) >> // length should always be 4 (TODO: confirm)
+        next_hop: take!(4) >>
+        (PathAttribute::NextHop(Box::new(NextHopAttribute { next_hop: Ipv4Addr::new(next_hop[0], next_hop[1], next_hop[2], next_hop[3]) })))
+    )
+);
+
+#[derive(Debug,PartialEq)]
+struct MultiExitDiscAttribute {
+    metric: u32,
+}
+
+named!(multi_exit_disc_attribute<&[u8], PathAttribute>,
+    do_parse!(
+        bits!(tag_bits!(u8, 8, 0b1000_0000)) >>
+        tag!([4u8]) >> // type code 4
+        tag!([4u8]) >> // length should always be 4
+        metric: be_u32 >>
+        (PathAttribute::MultiExitDisc(Box::new(MultiExitDiscAttribute { metric: metric })))
+    )
+);
+
+#[derive(Debug,PartialEq)]
+struct LocalPrefAttribute {
+    preference: u32,
+}
+
+named!(local_pref_attribute<&[u8], PathAttribute>,
+    do_parse!(
+        bits!(tag_bits!(u8, 8, 0b0100_0000)) >>
+        tag!([5u8]) >> // type code 5
+        tag!([4u8]) >> // length should always be 4
+        preference: be_u32 >>
+        (PathAttribute::LocalPref(Box::new(LocalPrefAttribute { preference: preference })))
+    )
+);
+
+#[derive(Debug,PartialEq)]
+struct AtomicAggregateAttribute {
+}
+
+named!(atomic_aggregate_attribute<&[u8], PathAttribute>,
+    do_parse!(
+        bits!(tag_bits!(u8, 8, 0b0100_0000)) >>
+        tag!([6u8]) >> // type code 5
+        tag!([0u8]) >> // length should always be 0
+        (PathAttribute::AtomicAggregate)
+    )
+);
+
+#[derive(Debug,PartialEq)]
+struct AggregatorAttribute {
+    aggregator_as: u16,
+    aggregator_id: Ipv4Addr,
+}
+
+named!(aggregator_attribute<&[u8], PathAttribute>,
+    do_parse!(
+        bits!(tag_bits!(u8, 8, 0b1100_0000)) >>
+        tag!([7u8]) >> // type code 5
+        tag!([6u8]) >> // length should always be 6
+        aggregator_as: be_u16 >>
+        aggregator_id: take!(4) >>
+        (PathAttribute::Aggregator(Box::new(AggregatorAttribute { aggregator_as: aggregator_as, aggregator_id: Ipv4Addr::new(aggregator_id[0], aggregator_id[1], aggregator_id[2], aggregator_id[3]) })))
     )
 );
 
@@ -369,7 +484,7 @@ mod tests {
 
     #[test]
     fn parse_bgp_prefix_test() {
-        let data = include_bytes!("../assets/test_bgp_nlri1.bin");
+        let data = include_bytes!("../assets/test_bgp_nlri2.bin");
         assert_eq!(parse_bgp_prefix(data), IResult::Done(&b""[..], Ipv4Prefix { prefix: &[192u8, 168, 4], length: 22 }));
     }
 
@@ -391,7 +506,7 @@ mod tests {
 
     #[test]
     fn parse_bgp_path_attribute_test() {
-        let data = include_bytes!("../assets/test_bgp_path_attributes1.bin");
+        let data = include_bytes!("../assets/test_bgp_path_attributes3.bin");
         let slice = &data[..];
         assert_eq!(
             parse_bgp_path_attribute(slice),
@@ -407,23 +522,85 @@ mod tests {
         );
     }
 
-    #[test]
+    /*#[test]
     fn parse_bgp_update_test() {
         let data = include_bytes!("../assets/test_bgp_update1.bin");
-        println!("bytes:\n{}", &data.to_hex(8));
+        //println!("bytes:\n{}", &data.to_hex(8));
         
         match parse_bgp_update(&data[19..]) {
-            IResult::Done(i, o) => {
-                println!("Done({:?}, {:?})", i, o);
-            },
-            IResult::Incomplete(n) => {
-                println!("Incomplete: {:?}", n);
-                panic!();
-            },
-            IResult::Error(e) => {
-                println!("Error: {:?}", e);
-                panic!("");
-            }
+            IResult::Done(i, o) => { println!("Done({:?}, {:?})", i, o); },
+            IResult::Incomplete(n) => { println!("Incomplete: {:?}", n); panic!(); },
+            IResult::Error(e) => { println!("Error: {:?}", e); panic!(); }
         }
+    }*/
+    
+    #[test]
+    fn new_origin_attribute_test() {
+        let input = include_bytes!("../assets/test_bgp_path_attribute_origin1.bin");
+        let slice = &input[..];
+        assert_eq!(origin_attribute(slice), IResult::Done(&b""[..], PathAttribute::Origin(Box::new(OriginAttribute { origin_code: BgpOriginCode::Incomplete }))));
+        
+        let input = include_bytes!("../assets/test_bgp_path_attribute_origin2.bin");
+        let slice = &input[..];
+        assert_eq!(origin_attribute(slice), IResult::Done(&b""[..], PathAttribute::Origin(Box::new(OriginAttribute { origin_code: BgpOriginCode::Igp }))));
+        
+        let input = include_bytes!("../assets/test_bgp_path_attribute_origin3.bin");
+        let slice = &input[..];
+        assert_eq!(origin_attribute(slice), IResult::Done(&b""[..], PathAttribute::Origin(Box::new(OriginAttribute { origin_code: BgpOriginCode::Egp }))));
+    }
+
+    #[test]
+    fn new_next_hop_attribute_test() {
+        let input = include_bytes!("../assets/test_bgp_path_attribute_next_hop1.bin");
+        let slice = &input[..];   
+        assert_eq!(next_hop_attribute(slice), IResult::Done(&b""[..], PathAttribute::NextHop(Box::new(NextHopAttribute { next_hop: Ipv4Addr::new(192, 168, 0, 15) }))));
+    
+        let input = include_bytes!("../assets/test_bgp_path_attribute_next_hop2.bin");
+        let slice = &input[..];   
+        assert_eq!(next_hop_attribute(slice), IResult::Done(&b""[..], PathAttribute::NextHop(Box::new(NextHopAttribute { next_hop: Ipv4Addr::new(192, 168, 0, 33) }))));
+    }
+
+    #[test]
+    fn new_multi_exit_disc_attribute_test() {
+        let input = include_bytes!("../assets/test_bgp_path_attribute_multi_exit_disc1.bin");
+        let slice = &input[..];
+        assert_eq!(multi_exit_disc_attribute(slice), IResult::Done(&b""[..], PathAttribute::MultiExitDisc(Box::new(MultiExitDiscAttribute { metric: 0 }))));
+    }
+    
+    #[test]
+    fn new_local_pref_attribute_test() {
+        let input = include_bytes!("../assets/test_bgp_path_attribute_local_pref1.bin");
+        let slice = &input[..];
+        assert_eq!(local_pref_attribute(slice), IResult::Done(&b""[..], PathAttribute::LocalPref(Box::new(LocalPrefAttribute { preference: 100 }))));
+    }
+    
+    #[test]
+    fn new_atomic_aggregate_attribute_test() {
+        let input = include_bytes!("../assets/test_bgp_path_attribute_atomic_aggregate1.bin");
+        let slice = &input[..];
+        assert_eq!(atomic_aggregate_attribute(slice), IResult::Done(&b""[..], PathAttribute::AtomicAggregate));
+    }
+
+    #[test]
+    fn new_aggregator_attribute_test() {
+        let input = include_bytes!("../assets/test_bgp_path_attribute_aggregator1.bin");
+        let slice = &input[..];
+        assert_eq!(aggregator_attribute(slice),
+            IResult::Done(&b""[..],
+                PathAttribute::Aggregator(Box::new(AggregatorAttribute { aggregator_as: 65210, aggregator_id: Ipv4Addr::new(192, 168, 0, 10) }))
+            )
+        );
+    }
+
+    #[test]
+    fn new_as_path_attribute_test() {
+        let input = include_bytes!("../assets/test_bgp_path_attribute_as_path1.bin");
+        let slice = &input[..];
+        assert_eq!(
+            as_path_attribute(slice),
+            IResult::Done(&b""[..],
+                PathAttribute::AsPath(Box::new(AsPathAttribute { as_path: vec![AsPathSegment::AsSet(vec![500, 500]), AsPathSegment::AsSequence(vec![65211])] }))
+            )
+        );
     }
 }
