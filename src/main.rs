@@ -20,23 +20,49 @@ use nom::{be_u8, be_u16, be_u32};
 use nom::IResult;
 use nom::Needed;
 
-/* TODO: Do I want to do it this way? Enums would be less memory
- * efficient.
- */
-/*#[derive(Debug)]
+// TODO: Do I want to do it this way?
+//
+// Due to over optimization of the wire format it is necessary to parse
+// whole messages as the length in the common header is required in the
+// sub messages. So we'll consume the bytes, and parse a whole message
+// with one big parser, and return an enum of the possible messages.
+//
+// It should be type, length, value, so I can parse the type, and the
+// length can be consumed by the child parser. But BGP inverts that,
+// forcing either to have one monolithic parser, create parsers that
+// can consume state from passed arguments, or create parsers that peek
+// ahead to find the type. I'm going with the middle option.
+
+// Parse all BGP messages.
+
+#[derive(Debug,PartialEq)]
 enum BgpMessage {
-    Open(BgpOpenMessage),
-    Notification(BgpNotificationMessage),
+    Open(Box<BgpOpenMessage>),
+    Update(Box<BgpUpdateMessage>),
+    Notification(Box<BgpNotificationMessage>),
+    Keepalive,
 }
 
-named!(parse_bgp_message<BgpOpenMessage>,
-    do_parse!(
-        bgp_header: parse_bgp_header >>
-        bgp_open_message: parse_bgp_open >>
-        (bgp_open_message)
-    )
-);*/
+named!(bgp_header_marker, tag!([0xff; 16]));
+named!(bgp_header_length<&[u8], u16>, verify!(be_u16, |v: u16| v >= 19 && v <= 4096));
+named!(bgp_header_type<&[u8], u8>, verify!(be_u8, |v: u8| v >= 1 && v <= 5));
 
+named!(parse_bgp_message<BgpMessage>,
+    do_parse!(
+        bgp_header_marker >>
+        length: bgp_header_length >>
+        //message_type: bgp_header_type >>
+        message: switch!(bgp_header_type,
+            1u8 => call!(parse_bgp_open) |
+            2u8 => call!(parse_bgp_update, length) |
+            3u8 => call!(parse_bgp_notification, length) |
+            4u8 => value!(BgpMessage::Keepalive) // TODO: need to test for valid length
+        ) >>
+        (message)
+    )
+);
+
+/* We're no longer using this.
 
 // Parse BGP message header. This is common to all BGP messages.
 
@@ -49,16 +75,11 @@ struct BgpMessageHeader {
 named!(parse_bgp_header<&[u8], BgpMessageHeader>,
     do_parse!(
         tag!([0xff; 16]) >> // Marker, must be all ones. 
-        
-        // Length of message including this header, must be >= 19 and <= 4096.
         length: verify!(be_u16, |v: u16| v >= 19 && v <= 4096) >>
-        
-        // Must be 1 OPEN, 2 UPDATE, 3 NOTIFICATION, 4 KEEPALIVE, 5 ROUTE-REFRESH
         message_type: verify!(be_u8, |v: u8| v >= 1 && v <= 5) >>
-        
         (BgpMessageHeader { length: length, message_type: message_type })
     )
-);
+);*/
 
 // Parse BGP Open message.
 
@@ -69,24 +90,27 @@ struct BgpOpenMessage {
     hold_time: u16,
     bgp_identifier: u32,
     optional_parameters_length: u8,
-    // TODO: Optional parameters not implemented
+    // TODO: Implement optional parameters.
 }
 
-// TODO: Implement validation.
-named!(parse_bgp_open<&[u8], BgpOpenMessage>,
+// TODO: Implement proper validation.
+
+named!(parse_bgp_open<&[u8], BgpMessage>,
     do_parse!(
         version: be_u8 >>
         my_autonomous_system: be_u16 >>
         hold_time: be_u16 >>
         bgp_identifier: be_u32 >>
         optional_parameters_length: be_u8 >>
-        (BgpOpenMessage{
-            version: version,
-            my_autonomous_system: my_autonomous_system,
-            hold_time: hold_time,
-            bgp_identifier: bgp_identifier,
-            optional_parameters_length: optional_parameters_length
-        })
+        (BgpMessage::Open(
+            Box::new(BgpOpenMessage{
+                version: version,
+                my_autonomous_system: my_autonomous_system,
+                hold_time: hold_time,
+                bgp_identifier: bgp_identifier,
+                optional_parameters_length: optional_parameters_length,
+            })
+        ))
     )
 );
 
@@ -96,72 +120,69 @@ named!(parse_bgp_open<&[u8], BgpOpenMessage>,
 struct BgpNotificationMessage {
     error_code: u8,
     error_subcode: u8,
-    // data (variable)
+    // TODO: Parse the data field.
 }
 
-// TODO: Implement validation. And implement handling of data field.
-named!(parse_bgp_notification<&[u8], BgpNotificationMessage>,
-    do_parse!(
-        error_code: be_u8 >>
-        error_subcode: be_u8 >>
-        (BgpNotificationMessage { error_code: error_code, error_subcode: error_subcode })
+// TODO: Implement proper validation. And implement proper handling of
+// the data field.
+
+//named!(parse_bgp_notification<&[u8], BgpMessage>,
+fn parse_bgp_notification(i: &[u8], length: u16) -> IResult<&[u8], BgpMessage> {
+    do_parse!(i,
+        error_code: verify!(be_u8, |v: u8| v >= 1 && v <= 6) >>
+        // TODO: The possible error_subcodes depend on the error_code.
+        error_subcode: verify!(be_u8, |v: u8| v >= 1 && v <= 11) >>
+        data: take!(length - 21) >>
+        (BgpMessage::Notification(Box::new(BgpNotificationMessage { error_code: error_code, error_subcode: error_subcode })))
     )
-);
+}
 
 // Parse BGP Update message.
 
-#[derive(Debug)]
-struct BgpUpdateMessage<'a> {
-    withdrawn_routes_length: u16,
-    withdrawn_routes: Vec<Ipv4Prefix<'a>>, // TODO: make this an Option?
-    total_path_attributes_length: u16,
-    path_attributes: &'a [u8],
-    //nlri: Vec<Ipv4Prefix<'a>> // TODO: make this an Option?
+#[derive(Debug,PartialEq)]
+struct BgpUpdateMessage {
+    withdrawn_routes: Vec<Ipv4Prefix>, // TODO: make this an Option?
+    path_attributes: Vec<u8>,
+    nlri: Vec<Ipv4Prefix>, // TODO: make this an Option?
 }
 
-// TODO: It's a pain that to calculate one of the field lengths you need
-// to know the total message length from the header. Ugh.
-
-named!(parse_bgp_update<&[u8], BgpUpdateMessage>,
-    do_parse!(
+//named!(parse_bgp_update<&[u8], BgpUpdateMessage>,
+fn parse_bgp_update(i: &[u8], length: u16) -> IResult<&[u8], BgpMessage> {
+    do_parse!(i,
         withdrawn_routes_length: be_u16 >>
         // TODO: Maybe wrap this in a cond!()?
         withdrawn_routes: flat_map!(take!(withdrawn_routes_length), complete!(many0!(parse_bgp_prefix))) >>
-
         total_path_attributes_length: be_u16 >>
         path_attributes: take!(total_path_attributes_length) >>
-        
-        // TODO: This needs to come from the header. For now faking it.
-        //total_message_length: value!(29) >>
-        //nlri_length: value!(total_message_length - 23 - total_path_attributes_length - withdrawn_routes_length) >>
-        //nlri: flat_map!(take!(nlri_length), complete!(many0!(parse_bgp_prefix))) >>
-        
-        (BgpUpdateMessage{
-            withdrawn_routes_length: withdrawn_routes_length,
-            withdrawn_routes: withdrawn_routes,
-            total_path_attributes_length: total_path_attributes_length,
-            path_attributes: path_attributes,
-            //nlri: nlri
-        })
+        nlri_length: value!(length - 23 - total_path_attributes_length - withdrawn_routes_length) >>
+        // TODO: Maybe wrap this in a cond!()?
+        nlri: flat_map!(take!(nlri_length), complete!(many0!(parse_bgp_prefix))) >>
+        (BgpMessage::Update(
+            Box::new(BgpUpdateMessage{
+                withdrawn_routes: withdrawn_routes,
+                path_attributes: path_attributes.to_vec(),
+                nlri: nlri
+            })
+        ))
     )
-);
+}
 
-// A BGP prefix found in withdrawn routes and NLRI.
-//
-// TODO: This is currently not padding out to four octects. And maybe
-// this should convert to the Rust Ipv4Addr type.
+// Parse a BGP prefix found in withdrawn routes and NLRI.
 
 #[derive(Debug, PartialEq)]
-struct Ipv4Prefix<'a> {
-    prefix: &'a [u8],
+struct Ipv4Prefix {
+    prefix: Vec<u8>,
     length: u8,
 }
+
+// TODO: This is currently not padding out to four octects. And maybe
+// this should convert to the Rust Ipv4Addr type.
 
 named!(parse_bgp_prefix<&[u8], Ipv4Prefix>,
     do_parse!(
         len_bits: be_u8 >>
         prefix: take!((len_bits + 7) / 8) >>
-        (Ipv4Prefix { prefix: prefix, length: len_bits })
+        (Ipv4Prefix { prefix: prefix.to_vec(), length: len_bits })
     )
 );
 
@@ -307,6 +328,12 @@ enum PathAttribute {
     AtomicAggregate,
     Aggregator(Box<AggregatorAttribute>),
 }
+
+named!(new_parse_bgp_path_attribute<&[u8], PathAttribute>,
+    alt!(origin_attribute | as_path_attribute | next_hop_attribute | 
+        multi_exit_disc_attribute | local_pref_attribute | atomic_aggregate_attribute |
+        aggregator_attribute)
+);
 
 #[derive(Debug,PartialEq)]
 enum BgpOriginCode {
@@ -459,33 +486,81 @@ mod tests {
     use super::*;
     use nom::{HexDisplay, IResult};
 
+    /* We're no longer using this.
     #[test]
     fn parse_bgp_header_test() {
         let data = include_bytes!("../assets/test_bgp_update1.bin");
         let slice = &data[..];
         assert_eq!(parse_bgp_header(slice), IResult::Done(&slice[19..], BgpMessageHeader { length: 98, message_type: 2 }));
-    }
+    }*/
 
     #[test]
     fn parse_bgp_open_test() {
-        let data = include_bytes!("../assets/test_bgp_open1.bin");
-        let slice = &data[19..];
+        let input = include_bytes!("../assets/test_bgp_open1.bin");
+        let slice = &input[19..];
         assert_eq!(parse_bgp_open(slice),
-            IResult::Done(&slice[10..],
-                BgpOpenMessage { version: 4, my_autonomous_system: 65033, hold_time: 180, bgp_identifier: 3232235535, optional_parameters_length: 0 }));
+            IResult::Done(&b""[..], BgpMessage::Open(Box::new(BgpOpenMessage { version: 4, my_autonomous_system: 65033, hold_time: 180, bgp_identifier: 3232235535, optional_parameters_length: 0 })))
+        );
+    }
+
+    #[test]
+    fn parse_bgp_open_full_test() {
+        let input = include_bytes!("../assets/test_bgp_open1.bin");
+        let slice = &input[..];
+        assert_eq!(parse_bgp_message(slice),
+            IResult::Done(&b""[..], BgpMessage::Open(Box::new(BgpOpenMessage { version: 4, my_autonomous_system: 65033, hold_time: 180, bgp_identifier: 3232235535, optional_parameters_length: 0 })))
+        );
     }
 
     #[test]
     fn parse_bgp_notification_test() {
-        let data = include_bytes!("../assets/test_bgp_notification1.bin");
-        let slice = &data[19..];
-        assert_eq!(parse_bgp_notification(slice), IResult::Done(&slice[2..], BgpNotificationMessage { error_code: 2, error_subcode: 2 }));
+        let input = include_bytes!("../assets/test_bgp_notification1.bin");
+        let slice = &input[19..];
+        assert_eq!(parse_bgp_notification(slice, 23), IResult::Done(&b""[..], BgpMessage::Notification(Box::new(BgpNotificationMessage { error_code: 2, error_subcode: 2 }))));
+    }
+
+    #[test]
+    fn parse_bgp_notification_full_test() {
+        let input = include_bytes!("../assets/test_bgp_notification1.bin");
+        let slice = &input[..];
+        assert_eq!(parse_bgp_message(slice), IResult::Done(&b""[..], BgpMessage::Notification(Box::new(BgpNotificationMessage { error_code: 2, error_subcode: 2 }))));
+    }
+
+    #[test]
+    fn parse_bgp_keepalive_test() {
+        let input = include_bytes!("../assets/test_bgp_keepalive1.bin");
+        let slice = &input[..];
+        assert_eq!(parse_bgp_message(slice), IResult::Done(&b""[..], BgpMessage::Keepalive));
+    }
+
+    #[test]
+    fn parse_bgp_update_test() {
+        let input = include_bytes!("../assets/test_bgp_update1.bin");
+        let slice = &input[19..];
+        
+        match parse_bgp_update(slice, 98) {
+            IResult::Done(i, o) => { println!("Done({:?}, {:?})", i, o); },
+            IResult::Incomplete(n) => { println!("Incomplete: {:?}", n); panic!(); },
+            IResult::Error(e) => { println!("Error: {:?}", e); panic!(); }
+        }
+    }
+
+    #[test]
+    fn parse_bgp_update_full_test() {
+        let input = include_bytes!("../assets/test_bgp_update1.bin");
+        let slice = &input[..];
+
+        match parse_bgp_message(slice) {
+            IResult::Done(i, o) => { println!("Done({:?}, {:?})", i, o); },
+            IResult::Incomplete(n) => { println!("Incomplete: {:?}", n); panic!(); },
+            IResult::Error(e) => { println!("Error: {:?}", e); panic!(); }
+        }
     }
 
     #[test]
     fn parse_bgp_prefix_test() {
-        let data = include_bytes!("../assets/test_bgp_nlri2.bin");
-        assert_eq!(parse_bgp_prefix(data), IResult::Done(&b""[..], Ipv4Prefix { prefix: &[192u8, 168, 4], length: 22 }));
+        let input = include_bytes!("../assets/test_bgp_nlri2.bin");
+        assert_eq!(parse_bgp_prefix(input), IResult::Done(&b""[..], Ipv4Prefix { prefix: vec![192u8, 168, 4], length: 22 }));
     }
 
     #[test]
@@ -521,18 +596,6 @@ mod tests {
             )
         );
     }
-
-    /*#[test]
-    fn parse_bgp_update_test() {
-        let data = include_bytes!("../assets/test_bgp_update1.bin");
-        //println!("bytes:\n{}", &data.to_hex(8));
-        
-        match parse_bgp_update(&data[19..]) {
-            IResult::Done(i, o) => { println!("Done({:?}, {:?})", i, o); },
-            IResult::Incomplete(n) => { println!("Incomplete: {:?}", n); panic!(); },
-            IResult::Error(e) => { println!("Error: {:?}", e); panic!(); }
-        }
-    }*/
     
     #[test]
     fn new_origin_attribute_test() {
@@ -547,6 +610,18 @@ mod tests {
         let input = include_bytes!("../assets/test_bgp_path_attribute_origin3.bin");
         let slice = &input[..];
         assert_eq!(origin_attribute(slice), IResult::Done(&b""[..], PathAttribute::Origin(Box::new(OriginAttribute { origin_code: BgpOriginCode::Egp }))));
+    }
+
+    #[test]
+    fn new_as_path_attribute_test() {
+        let input = include_bytes!("../assets/test_bgp_path_attribute_as_path1.bin");
+        let slice = &input[..];
+        assert_eq!(
+            as_path_attribute(slice),
+            IResult::Done(&b""[..],
+                PathAttribute::AsPath(Box::new(AsPathAttribute { as_path: vec![AsPathSegment::AsSet(vec![500, 500]), AsPathSegment::AsSequence(vec![65211])] }))
+            )
+        );
     }
 
     #[test]
@@ -588,18 +663,6 @@ mod tests {
         assert_eq!(aggregator_attribute(slice),
             IResult::Done(&b""[..],
                 PathAttribute::Aggregator(Box::new(AggregatorAttribute { aggregator_as: 65210, aggregator_id: Ipv4Addr::new(192, 168, 0, 10) }))
-            )
-        );
-    }
-
-    #[test]
-    fn new_as_path_attribute_test() {
-        let input = include_bytes!("../assets/test_bgp_path_attribute_as_path1.bin");
-        let slice = &input[..];
-        assert_eq!(
-            as_path_attribute(slice),
-            IResult::Done(&b""[..],
-                PathAttribute::AsPath(Box::new(AsPathAttribute { as_path: vec![AsPathSegment::AsSet(vec![500, 500]), AsPathSegment::AsSequence(vec![65211])] }))
             )
         );
     }
