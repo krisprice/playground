@@ -20,20 +20,24 @@ use nom::{be_u8, be_u16, be_u32};
 use nom::IResult;
 use nom::Needed;
 
-// TODO: Do I want to do it this way?
+// We have one top level parser that calls each of the message specific
+// parsers based on a switch. When required it passes the length field
+// from the common header as an argument.
 //
-// Due to over optimization of the wire format it is necessary to parse
-// whole messages as the length in the common header is required in the
-// sub messages. So we'll consume the bytes, and parse a whole message
-// with one big parser, and return an enum of the possible messages.
+// It would be tider and less error prone (IMO) to have one parser for
+// each message type that encapsulates everything about that message,
+// including it's type code. And then simply use the alt!() combinator
+// in the top level parser. But the BGP format makes that impossible,
+// without either backtracking or peeking over many bytes. If it were
+// the usual type, length, value this wouldn't be the case. Instead it
+// is length, type, value.
 //
-// It should be type, length, value, so I can parse the type, and the
-// length can be consumed by the child parser. But BGP inverts that,
-// forcing either to have one monolithic parser, create parsers that
-// can consume state from passed arguments, or create parsers that peek
-// ahead to find the type. I'm going with the middle option.
+// The complication of passing the length field from the common header
+// to some message specific parsers seems to come from optimizing the
+// wire format in order to save a couple of bytes. A similar problem
+// arises with parsing the path attributes later.
 
-// Parse all BGP messages.
+// BGP messages.
 
 #[derive(Debug,PartialEq)]
 enum BgpMessage {
@@ -42,46 +46,6 @@ enum BgpMessage {
     Notification(Box<BgpNotificationMessage>),
     Keepalive,
 }
-
-named!(bgp_header_marker, tag!([0xff; 16]));
-named!(bgp_header_length<&[u8], u16>, verify!(be_u16, |v: u16| v >= 19 && v <= 4096));
-named!(bgp_header_type<&[u8], u8>, verify!(be_u8, |v: u8| v >= 1 && v <= 5));
-
-named!(parse_bgp_message<BgpMessage>,
-    do_parse!(
-        bgp_header_marker >>
-        length: bgp_header_length >>
-        //message_type: bgp_header_type >>
-        message: switch!(bgp_header_type,
-            1u8 => call!(parse_bgp_open) |
-            2u8 => call!(parse_bgp_update, length) |
-            3u8 => call!(parse_bgp_notification, length) |
-            4u8 => value!(BgpMessage::Keepalive) // TODO: need to test for valid length
-        ) >>
-        (message)
-    )
-);
-
-/* We're no longer using this.
-
-// Parse BGP message header. This is common to all BGP messages.
-
-#[derive(Debug,PartialEq)]
-struct BgpMessageHeader {
-    length: u16,
-    message_type: u8,
-}
-
-named!(parse_bgp_header<&[u8], BgpMessageHeader>,
-    do_parse!(
-        tag!([0xff; 16]) >> // Marker, must be all ones. 
-        length: verify!(be_u16, |v: u16| v >= 19 && v <= 4096) >>
-        message_type: verify!(be_u8, |v: u8| v >= 1 && v <= 5) >>
-        (BgpMessageHeader { length: length, message_type: message_type })
-    )
-);*/
-
-// Parse BGP Open message.
 
 #[derive(Debug,PartialEq)]
 struct BgpOpenMessage {
@@ -93,11 +57,49 @@ struct BgpOpenMessage {
     // TODO: Implement optional parameters.
 }
 
+#[derive(Debug,PartialEq)]
+struct BgpUpdateMessage {
+    withdrawn_routes: Vec<Ipv4Prefix>, // TODO: make this an Option?
+    path_attributes: Vec<BgpPathAttribute>,
+    //path_attributes: Vec<PathAttribute>,
+    nlri: Vec<Ipv4Prefix>, // TODO: make this an Option?
+}
+
+#[derive(Debug,PartialEq)]
+struct BgpNotificationMessage {
+    error_code: u8,
+    error_subcode: u8,
+    // TODO: Implement the data field.
+}
+
+// Top level parser to parse all BGP messages.
+
+named!(bgp_header_marker, tag!([0xff; 16]));
+named!(bgp_header_length<&[u8], u16>, verify!(be_u16, |v: u16| v >= 19 && v <= 4096));
+named!(bgp_header_type<&[u8], u8>, verify!(be_u8, |v: u8| v >= 1 && v <= 5));
+
+named!(parse_bgp_message<BgpMessage>,
+    do_parse!(
+        bgp_header_marker >>
+        length: bgp_header_length >>
+        message: switch!(bgp_header_type,
+            1u8 => call!(parse_bgp_open) |
+            2u8 => call!(parse_bgp_update, length) |
+            3u8 => call!(parse_bgp_notification, length) |
+            4u8 => value!(BgpMessage::Keepalive) // TODO: need to test for valid length
+        ) >>
+        (message)
+    )
+);
+
+// Parse BGP Open message.
+
 // TODO: Implement proper validation.
+// TODO: Implement optional parameters.
 
 named!(parse_bgp_open<&[u8], BgpMessage>,
     do_parse!(
-        version: be_u8 >>
+        version: verify!(be_u8, |v: u8| v == 4) >>
         my_autonomous_system: be_u16 >>
         hold_time: be_u16 >>
         bgp_identifier: be_u32 >>
@@ -116,13 +118,6 @@ named!(parse_bgp_open<&[u8], BgpMessage>,
 
 // Parse BGP Notification message.
 
-#[derive(Debug,PartialEq)]
-struct BgpNotificationMessage {
-    error_code: u8,
-    error_subcode: u8,
-    // TODO: Parse the data field.
-}
-
 // TODO: Implement proper validation. And implement proper handling of
 // the data field.
 
@@ -139,13 +134,6 @@ fn parse_bgp_notification(i: &[u8], length: u16) -> IResult<&[u8], BgpMessage> {
 
 // Parse BGP Update message.
 
-#[derive(Debug,PartialEq)]
-struct BgpUpdateMessage {
-    withdrawn_routes: Vec<Ipv4Prefix>, // TODO: make this an Option?
-    path_attributes: Vec<u8>,
-    nlri: Vec<Ipv4Prefix>, // TODO: make this an Option?
-}
-
 //named!(parse_bgp_update<&[u8], BgpUpdateMessage>,
 fn parse_bgp_update(i: &[u8], length: u16) -> IResult<&[u8], BgpMessage> {
     do_parse!(i,
@@ -153,14 +141,15 @@ fn parse_bgp_update(i: &[u8], length: u16) -> IResult<&[u8], BgpMessage> {
         // TODO: Maybe wrap this in a cond!()?
         withdrawn_routes: flat_map!(take!(withdrawn_routes_length), complete!(many0!(parse_bgp_prefix))) >>
         total_path_attributes_length: be_u16 >>
-        path_attributes: take!(total_path_attributes_length) >>
+        path_attributes: flat_map!(take!(total_path_attributes_length), complete!(many0!(old_parse_bgp_path_attribute))) >>
+        //path_attributes: flat_map!(take!(total_path_attributes_length), complete!(many0!(new_parse_bgp_path_attribute))) >>
         nlri_length: value!(length - 23 - total_path_attributes_length - withdrawn_routes_length) >>
         // TODO: Maybe wrap this in a cond!()?
         nlri: flat_map!(take!(nlri_length), complete!(many0!(parse_bgp_prefix))) >>
         (BgpMessage::Update(
             Box::new(BgpUpdateMessage{
                 withdrawn_routes: withdrawn_routes,
-                path_attributes: path_attributes.to_vec(),
+                path_attributes: path_attributes,
                 nlri: nlri
             })
         ))
@@ -246,58 +235,13 @@ named!(parse_bgp_path_attribute_flags<&[u8], BgpPathAttributeFlags>,
     )
 );
 
+// BGP Path Attributes.
+
 #[derive(Debug,PartialEq)]
-struct BgpPathAttribute<'a> {
+struct BgpPathAttribute {
     flags: BgpPathAttributeFlags,
-    type_code: u8,
-    length: u16,
-    value: &'a [u8]
+    attribute: PathAttribute,
 }
-
-// Extract BGP Path Attributes.
-//
-// The length field is either one or two bytes based on the extended
-// length bit in the flags. This makes parsing more difficult than it
-// should be, just for the sake of savings a few bytes.
-//
-// There are only four bits used in the flags. The lower four bits of
-// the flags field must be empty and ignored. There's four extra bits
-// that could've been used right there. Conveniently a 12 bit length
-// field would give us lengths up to 4096 bytes, which is more than
-// enough given the maximum length of a BGP message is also 4096 bytes.
-//
-// TODO: Should parsing all attributes be done with a permutation of
-// attribute specific parsers? This would be more elegant, but the
-// problem is it would require either re-parsing the same flags field
-// for each attribute sub-parser, or parsing them once then passing
-// the extracted flags to each sub-parser as an argument.
-//
-// Given that things like flags and length need to be verified as valid
-// for each attribute type it seems doing that would be cleaner.
-
-named!(parse_bgp_path_attribute<&[u8], BgpPathAttribute>,
-    do_parse!(
-        flags: parse_bgp_path_attribute_flags >>
-        type_code: be_u8 >>
-        length: switch!(value!(flags.extended_length as u8),
-            1 => call!(be_u16) |
-            0 => map!(call!(be_u8), |v: u8| v as u16)
-        ) >>
-        value: take!(length) >>
-
-        // TODO: convert to switch here and call the next parser of the
-        // content based on the type_code.
-        (BgpPathAttribute {
-            flags: flags,
-            type_code: type_code,
-            length: length,
-            value: value
-        })
-    )
-);
-
-// Or... would this method below be tidier? It would seem (intuitively)
-// to be less efficient.
 
 #[derive(Debug,PartialEq)]
 enum PathAttribute {
@@ -309,12 +253,6 @@ enum PathAttribute {
     AtomicAggregate,
     Aggregator(Box<AggregatorAttribute>),
 }
-
-named!(new_parse_bgp_path_attribute<&[u8], PathAttribute>,
-    alt!(origin_attribute | as_path_attribute | next_hop_attribute | 
-        multi_exit_disc_attribute | local_pref_attribute | atomic_aggregate_attribute |
-        aggregator_attribute)
-);
 
 #[derive(Debug,PartialEq)]
 enum BgpOriginCode {
@@ -339,16 +277,6 @@ struct OriginAttribute {
     origin_code: BgpOriginCode,
 }
 
-named!(origin_attribute<&[u8], PathAttribute>,
-    do_parse!(
-        bits!(tag_bits!(u8, 8, 0b0100_0000)) >>
-        tag!([1u8]) >> // type code 1
-        tag!([1u8]) >> // length should always be 1
-        origin_code: be_u8 >>
-        (PathAttribute::Origin(Box::new(OriginAttribute { origin_code: BgpOriginCode::from(origin_code) })))
-    )
-);
-
 #[derive(Debug,PartialEq)]
 enum AsPathSegment {
     AsSet(Vec<u16>),
@@ -359,6 +287,158 @@ enum AsPathSegment {
 struct AsPathAttribute {
     as_path: Vec<AsPathSegment>,
 }
+
+#[derive(Debug,PartialEq)]
+struct NextHopAttribute {
+    next_hop: Ipv4Addr,
+}
+
+#[derive(Debug,PartialEq)]
+struct MultiExitDiscAttribute {
+    metric: u32,
+}
+
+#[derive(Debug,PartialEq)]
+struct LocalPrefAttribute {
+    preference: u32,
+}
+
+#[derive(Debug,PartialEq)]
+struct AggregatorAttribute {
+    aggregator_as: u16,
+    aggregator_id: Ipv4Addr,
+}
+
+// The length field is either one or two bytes based on the extended
+// length bit in the flags. This makes parsing more difficult than it
+// should be, just for the sake of savings a few bytes.
+//
+// There are only four bits used in the flags. The lower four bits of
+// the flags field must be empty and ignored. There's four extra bits
+// that could've been used right there. Conveniently a 12 bit length
+// field would give us lengths up to 4096 bytes, which is more than
+// enough given the maximum length of a BGP message is also 4096 bytes.
+
+// TODO: Make child parsers aware of extended length. Either we pass the
+// flags to the chlid parsers and the child parsers then validate both
+// the flags and length according to the standard, or we pass the length
+// and do the flags verification in the parent parser.
+
+named!(old_parse_bgp_path_attribute<&[u8], BgpPathAttribute>,
+    do_parse!(
+        flags: parse_bgp_path_attribute_flags >>
+        type_code: be_u8 >>
+        /*length: switch!(value!(flags.extended_length as u8),
+            1 => call!(be_u16) |
+            0 => map!(call!(be_u8), |v: u8| v as u16)
+        ) >>*/
+        attribute: switch!(value!(type_code),
+            1 => call!(old_origin_attribute) |
+            2 => call!(old_as_path_attribute) |
+            3 => call!(old_next_hop_attribute) |
+            4 => call!(old_multi_exit_disc_attribute) |
+            5 => call!(old_local_pref_attribute) |
+            6 => call!(old_atomic_aggregate_attribute) |
+            7 => call!(old_aggregator_attribute)
+        ) >>
+        (BgpPathAttribute { flags: flags, attribute: attribute })
+    )
+);
+
+named!(old_origin_attribute<&[u8], PathAttribute>,
+    do_parse!(
+        tag!([1u8]) >> // length should always be 1
+        origin_code: be_u8 >>
+        (PathAttribute::Origin(Box::new(OriginAttribute { origin_code: BgpOriginCode::from(origin_code) })))
+    )
+);
+
+named!(old_as_path_segment<&[u8], AsPathSegment>,
+    do_parse!(
+        type_code: verify!(be_u8, |v: u8| v >= 1 && v <= 2) >> // TODO: or use alt!() or one_of!()?
+        seg: length_count!(be_u8, be_u16) >>
+        (match type_code {
+            1u8 => AsPathSegment::AsSet(seg),
+            2u8 => AsPathSegment::AsSequence(seg),
+            _ => unreachable!(),
+        })
+    )
+);
+
+named!(old_as_path_attribute<&[u8], PathAttribute>,
+    do_parse!(
+        length: be_u8 >> // TODO: need to recognize extended length flag
+        as_path_segments: flat_map!(take!(length), complete!(many0!(old_as_path_segment))) >>
+        (PathAttribute::AsPath(Box::new(AsPathAttribute { as_path: as_path_segments })))
+    )
+);
+
+named!(old_next_hop_attribute<&[u8], PathAttribute>,
+    do_parse!(
+        tag!([4u8]) >> // length should always be 4 (TODO: confirm)
+        next_hop: take!(4) >>
+        (PathAttribute::NextHop(Box::new(NextHopAttribute { next_hop: Ipv4Addr::new(next_hop[0], next_hop[1], next_hop[2], next_hop[3]) })))
+    )
+);
+
+named!(old_multi_exit_disc_attribute<&[u8], PathAttribute>,
+    do_parse!(
+        tag!([4u8]) >> // length should always be 4
+        metric: be_u32 >>
+        (PathAttribute::MultiExitDisc(Box::new(MultiExitDiscAttribute { metric: metric })))
+    )
+);
+
+named!(old_local_pref_attribute<&[u8], PathAttribute>,
+    do_parse!(
+        tag!([4u8]) >> // length should always be 4
+        preference: be_u32 >>
+        (PathAttribute::LocalPref(Box::new(LocalPrefAttribute { preference: preference })))
+    )
+);
+
+named!(old_atomic_aggregate_attribute<&[u8], PathAttribute>,
+    do_parse!(
+        tag!([0u8]) >> // length should always be 0
+        (PathAttribute::AtomicAggregate)
+    )
+);
+
+named!(old_aggregator_attribute<&[u8], PathAttribute>,
+    do_parse!(
+        tag!([6u8]) >> // length should always be 6
+        aggregator_as: be_u16 >>
+        aggregator_id: take!(4) >>
+        (PathAttribute::Aggregator(Box::new(AggregatorAttribute { aggregator_as: aggregator_as, aggregator_id: Ipv4Addr::new(aggregator_id[0], aggregator_id[1], aggregator_id[2], aggregator_id[3]) })))
+    )
+);
+
+// Or... would this method below be tidier? It would seem (intuitively)
+// to be less efficient, but it would allow encapsulating all of the
+// validation in one place.
+//
+// This would be the tidier approach if only the flags had been placed
+// after the type code.
+
+// TODO: These need to work for cases where different flags are set and
+// need to preserve certain optional flags like the partial bit.
+
+named!(new_parse_bgp_path_attribute<&[u8], PathAttribute>,
+    alt!(origin_attribute | as_path_attribute | next_hop_attribute | 
+        multi_exit_disc_attribute | local_pref_attribute | atomic_aggregate_attribute |
+        aggregator_attribute)
+);
+
+named!(origin_attribute<&[u8], PathAttribute>,
+    do_parse!(
+        bits!(tag_bits!(u8, 8, 0b0100_0000)) >>
+        tag!([1u8]) >> // type code 1
+        tag!([1u8]) >> // length should always be 1
+        origin_code: be_u8 >>
+        (PathAttribute::Origin(Box::new(OriginAttribute { origin_code: BgpOriginCode::from(origin_code) })))
+    )
+);
+
 
 named!(as_set<&[u8], Vec<u16>>, preceded!(tag!([1u8]), length_count!(be_u8, be_u16)));
 named!(as_sequence<&[u8], Vec<u16>>, preceded!(tag!([2u8]), length_count!(be_u8, be_u16)));
@@ -387,11 +467,6 @@ named!(as_path_attribute<&[u8], PathAttribute>,
     )
 );
 
-#[derive(Debug,PartialEq)]
-struct NextHopAttribute {
-    next_hop: Ipv4Addr,
-}
-
 named!(next_hop_attribute<&[u8], PathAttribute>,
     do_parse!(
         bits!(tag_bits!(u8, 8, 0b0100_0000)) >>
@@ -401,11 +476,6 @@ named!(next_hop_attribute<&[u8], PathAttribute>,
         (PathAttribute::NextHop(Box::new(NextHopAttribute { next_hop: Ipv4Addr::new(next_hop[0], next_hop[1], next_hop[2], next_hop[3]) })))
     )
 );
-
-#[derive(Debug,PartialEq)]
-struct MultiExitDiscAttribute {
-    metric: u32,
-}
 
 named!(multi_exit_disc_attribute<&[u8], PathAttribute>,
     do_parse!(
@@ -417,11 +487,6 @@ named!(multi_exit_disc_attribute<&[u8], PathAttribute>,
     )
 );
 
-#[derive(Debug,PartialEq)]
-struct LocalPrefAttribute {
-    preference: u32,
-}
-
 named!(local_pref_attribute<&[u8], PathAttribute>,
     do_parse!(
         bits!(tag_bits!(u8, 8, 0b0100_0000)) >>
@@ -432,10 +497,6 @@ named!(local_pref_attribute<&[u8], PathAttribute>,
     )
 );
 
-#[derive(Debug,PartialEq)]
-struct AtomicAggregateAttribute {
-}
-
 named!(atomic_aggregate_attribute<&[u8], PathAttribute>,
     do_parse!(
         bits!(tag_bits!(u8, 8, 0b0100_0000)) >>
@@ -444,12 +505,6 @@ named!(atomic_aggregate_attribute<&[u8], PathAttribute>,
         (PathAttribute::AtomicAggregate)
     )
 );
-
-#[derive(Debug,PartialEq)]
-struct AggregatorAttribute {
-    aggregator_as: u16,
-    aggregator_id: Ipv4Addr,
-}
 
 named!(aggregator_attribute<&[u8], PathAttribute>,
     do_parse!(
@@ -466,14 +521,6 @@ named!(aggregator_attribute<&[u8], PathAttribute>,
 mod tests {
     use super::*;
     use nom::{HexDisplay, IResult};
-
-    /* We're no longer using this.
-    #[test]
-    fn parse_bgp_header_test() {
-        let data = include_bytes!("../assets/test_bgp_update1.bin");
-        let slice = &data[..];
-        assert_eq!(parse_bgp_header(slice), IResult::Done(&slice[19..], BgpMessageHeader { length: 98, message_type: 2 }));
-    }*/
 
     #[test]
     fn parse_bgp_open_test() {
@@ -520,11 +567,11 @@ mod tests {
         let slice = &input[19..];
         
         // TODO: fix
-        /*match parse_bgp_update(slice, 98) {
+        match parse_bgp_update(slice, 98) {
             IResult::Done(i, o) => { println!("Done({:?}, {:?})", i, o); },
             IResult::Incomplete(n) => { println!("Incomplete: {:?}", n); panic!(); },
             IResult::Error(e) => { println!("Error: {:?}", e); panic!(); }
-        }*/
+        }
     }
 
     #[test]
@@ -533,11 +580,11 @@ mod tests {
         let slice = &input[..];
 
         // TODO: fix
-        /*match parse_bgp_message(slice) {
+        match parse_bgp_message(slice) {
             IResult::Done(i, o) => { println!("Done({:?}, {:?})", i, o); },
             IResult::Incomplete(n) => { println!("Incomplete: {:?}", n); panic!(); },
             IResult::Error(e) => { println!("Error: {:?}", e); panic!(); }
-        }*/
+        }
     }
 
     #[test]
@@ -559,28 +606,27 @@ mod tests {
         let input = include_bytes!("../assets/test_bgp_path_attributes3.bin");
         let slice = &input[..];
         
-        assert_eq!(parse_bgp_path_attribute(slice),
+        assert_eq!(old_parse_bgp_path_attribute(slice),
             IResult::Done(&slice[4..],
                 BgpPathAttribute {
                     flags: BgpPathAttributeFlags { optional: false, transitive: true, partial: false, extended_length: false },
-                    type_code: 1,
-                    length: 1,
-                    value: &[1]
+                    attribute: PathAttribute::Origin(Box::new(OriginAttribute { origin_code: BgpOriginCode::Egp }))
                 }
             )
         );
 
-        let s1 = [0b00000000, 1u8, 2u8, 0xFF, 0xFF];
-        let s2 = [0b00010000, 1u8, 0u8, 2u8, 0xFF, 0xFF];
+        assert_eq!(new_parse_bgp_path_attribute(slice), IResult::Done(&slice[4..], PathAttribute::Origin(Box::new(OriginAttribute { origin_code: BgpOriginCode::Egp }))));
+
+        /*
+        let s1 = [0b00000000, 2u8, 4u8, 1u8, 1u8, 0xFF, 0xFF];
+        let s2 = [0b00010000, 2u8, 0u8, 4u8, 1u8, 1u8, 0xFF, 0xFF];
 
         // not extended length
         assert_eq!(parse_bgp_path_attribute(&s1[..]),
             IResult::Done(&b""[..],
                 BgpPathAttribute {
                     flags: BgpPathAttributeFlags { optional: false, transitive: false, partial: false, extended_length: false },
-                    type_code: 1,
-                    length: 2,
-                    value: &[0xFF, 0xFF]
+                    attribute: ...
                 }
             )
         );
@@ -590,12 +636,10 @@ mod tests {
             IResult::Done(&b""[..],
                 BgpPathAttribute {
                     flags: BgpPathAttributeFlags { optional: false, transitive: false, partial: false, extended_length: true },
-                    type_code: 1,
-                    length: 2,
-                    value: &[0xFF, 0xFF]
+                    attribute: ...
                 }
             )
-        );
+        );*/
     }
     
     #[test]
@@ -617,12 +661,7 @@ mod tests {
     fn new_as_path_attribute_test() {
         let input = include_bytes!("../assets/test_bgp_path_attribute_as_path1.bin");
         let slice = &input[..];
-        assert_eq!(
-            as_path_attribute(slice),
-            IResult::Done(&b""[..],
-                PathAttribute::AsPath(Box::new(AsPathAttribute { as_path: vec![AsPathSegment::AsSet(vec![500, 500]), AsPathSegment::AsSequence(vec![65211])] }))
-            )
-        );
+        assert_eq!(as_path_attribute(slice), IResult::Done(&b""[..], PathAttribute::AsPath(Box::new(AsPathAttribute { as_path: vec![AsPathSegment::AsSet(vec![500, 500]), AsPathSegment::AsSequence(vec![65211])] }))));
     }
 
     #[test]
@@ -661,10 +700,6 @@ mod tests {
     fn new_aggregator_attribute_test() {
         let input = include_bytes!("../assets/test_bgp_path_attribute_aggregator1.bin");
         let slice = &input[..];
-        assert_eq!(aggregator_attribute(slice),
-            IResult::Done(&b""[..],
-                PathAttribute::Aggregator(Box::new(AggregatorAttribute { aggregator_as: 65210, aggregator_id: Ipv4Addr::new(192, 168, 0, 10) }))
-            )
-        );
+        assert_eq!(aggregator_attribute(slice), IResult::Done(&b""[..], PathAttribute::Aggregator(Box::new(AggregatorAttribute { aggregator_as: 65210, aggregator_id: Ipv4Addr::new(192, 168, 0, 10) }))));
     }
 }
