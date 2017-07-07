@@ -32,6 +32,11 @@ use nom::Needed;
 // the usual type, length, value this wouldn't be the case. Instead it
 // is length, type, value.
 //
+// To give an example, consider error checking in the first top level
+// parser that must check first if the type is recognized, then based
+// on the type must do type specific checks on the length field that
+// came before it.
+//
 // The complication of passing the length field from the common header
 // to some message specific parsers seems to come from optimizing the
 // wire format in order to save a couple of bytes. A similar problem
@@ -65,6 +70,12 @@ struct BgpUpdateMessage {
     nlri: Vec<Ipv4Prefix>, // TODO: make this an Option?
 }
 
+#[derive(Debug, PartialEq)]
+struct Ipv4Prefix {
+    prefix: Vec<u8>,
+    length: u8,
+}
+
 #[derive(Debug,PartialEq)]
 struct BgpNotificationMessage {
     error_code: u8,
@@ -74,9 +85,9 @@ struct BgpNotificationMessage {
 
 // Top level parser to parse all BGP messages.
 
-named!(bgp_header_marker, tag!([0xff; 16]));
-named!(bgp_header_length<&[u8], u16>, verify!(be_u16, |v: u16| v >= 19 && v <= 4096));
-named!(bgp_header_type<&[u8], u8>, verify!(be_u8, |v: u8| v >= 1 && v <= 5));
+named!(bgp_header_marker, tag!([0xff; 16])); // or error subcode not synchronized
+named!(bgp_header_length<&[u8], u16>, verify!(be_u16, |v: u16| v >= 19 && v <= 4096)); // validate per case inside each message
+named!(bgp_header_type<&[u8], u8>, verify!(be_u8, |v: u8| v >= 1 && v <= 5)); // or error subcode not recognized
 
 named!(parse_bgp_message<BgpMessage>,
     do_parse!(
@@ -87,6 +98,7 @@ named!(parse_bgp_message<BgpMessage>,
             2u8 => call!(parse_bgp_update, length) |
             3u8 => call!(parse_bgp_notification, length) |
             4u8 => value!(BgpMessage::Keepalive) // TODO: need to test for valid length
+            // put error handling for unrecognized type here, return error subcode
         ) >>
         (message)
     )
@@ -121,30 +133,26 @@ named!(parse_bgp_open<&[u8], BgpMessage>,
 // TODO: Implement proper validation. And implement proper handling of
 // the data field.
 
-//named!(parse_bgp_notification<&[u8], BgpMessage>,
-fn parse_bgp_notification(i: &[u8], length: u16) -> IResult<&[u8], BgpMessage> {
-    do_parse!(i,
+named_args!(parse_bgp_notification(length: u16) <BgpMessage>,
+    do_parse!(
         error_code: verify!(be_u8, |v: u8| v >= 1 && v <= 6) >>
         // TODO: The possible error_subcodes depend on the error_code.
         error_subcode: verify!(be_u8, |v: u8| v >= 1 && v <= 11) >>
         data: take!(length - 21) >>
         (BgpMessage::Notification(Box::new(BgpNotificationMessage { error_code: error_code, error_subcode: error_subcode })))
     )
-}
+);
 
 // Parse BGP Update message.
 
-//named!(parse_bgp_update<&[u8], BgpUpdateMessage>,
-fn parse_bgp_update(i: &[u8], length: u16) -> IResult<&[u8], BgpMessage> {
-    do_parse!(i,
+named_args!(parse_bgp_update(length: u16) <BgpMessage>,
+    do_parse!(
         withdrawn_routes_length: be_u16 >>
-        // TODO: Maybe wrap this in a cond!()?
         withdrawn_routes: flat_map!(take!(withdrawn_routes_length), complete!(many0!(parse_bgp_prefix))) >>
         total_path_attributes_length: be_u16 >>
         path_attributes: flat_map!(take!(total_path_attributes_length), complete!(many0!(old_parse_bgp_path_attribute))) >>
         //path_attributes: flat_map!(take!(total_path_attributes_length), complete!(many0!(new_parse_bgp_path_attribute))) >>
         nlri_length: value!(length - 23 - total_path_attributes_length - withdrawn_routes_length) >>
-        // TODO: Maybe wrap this in a cond!()?
         nlri: flat_map!(take!(nlri_length), complete!(many0!(parse_bgp_prefix))) >>
         (BgpMessage::Update(
             Box::new(BgpUpdateMessage{
@@ -154,15 +162,9 @@ fn parse_bgp_update(i: &[u8], length: u16) -> IResult<&[u8], BgpMessage> {
             })
         ))
     )
-}
+);
 
 // Parse a BGP prefix found in withdrawn routes and NLRI.
-
-#[derive(Debug, PartialEq)]
-struct Ipv4Prefix {
-    prefix: Vec<u8>,
-    length: u8,
-}
 
 // TODO: This is currently not padding out to four octects. And maybe
 // this should convert to the Rust Ipv4Addr type.
@@ -175,45 +177,13 @@ named!(parse_bgp_prefix<&[u8], Ipv4Prefix>,
     )
 );
 
-// Extract the BGP Path Attribute Flags. Is there a nicer way to do
-// this?
-//
-// TODO: Add validation, e.g. transitive must be 1 if optional is 0,
-// and the lower 4 bits must be zero.
-//
-// Rant:
-// Why do we even have some of these flags? Think about this. The first
-// flag is the optional flag. It defines it the attribute is well knwon
-// or optional. If it's well-known, then of course by virtue of it being
-// well-known you know that from it's type code. If it's optional, then
-// similarly don't you also know it's optional from it's type code by the
-// virtue of it either being something your BGP speaker recognizes, of by
-// virtue of the fact that it doesn't but your BGP speaker recognizes all
-// of the well-known attributes. Quoting the RFC: BGP implementations MUST
-// recognize all well-known attributes. The only use for having this flag
-// is to be able to distinguish between ANY unrecognized attribute, and a
-// unrecognized attribute that you recieve which has the well-known flag
-// set. This is a pointless error, so we've added this flag, and a
-// pointless error, and made error processing more complex on top of it!
-//
-// The next bit is the Transitive bit. It is somewhat more useful as it
-// tells the BGP speaker what to do with the atribute if it doesn't
-// recognize it. When the BGP speaker receives an optional *transitive*
-// attribute it doesn't recognize it should pass it on. That's only a
-// SHOULD in the RFC. There aren't that many optional transitive
-// attributes though, why not just drop them if you don't speak them? I
-// mean really, how hard is it to add recognition for a new attribute
-// type and determine if you should transit it or not on that basis?
-//
-// The third bit is the partial bit. It defines whether the information
-// contained in the optional transitive attribute is partial. It only
-// applies to optional transitive attributes. Which aren't many, and it
-// gets set by bgp speakers that don't recognize an optional transitive
-// attribute, but decide they'll pass it on anyway. So if you don't do
-// that, you don't need this bit.
-//
-// The fourth bit is the extended length bit, it makes life difficult for
-// no reason. See further below.
+// BGP Path Attributes.
+
+#[derive(Debug,PartialEq)]
+struct BgpPathAttribute {
+    flags: BgpPathAttributeFlags,
+    attribute: PathAttribute,
+}
 
 #[derive(Debug,PartialEq)]
 struct BgpPathAttributeFlags {
@@ -221,26 +191,6 @@ struct BgpPathAttributeFlags {
     transitive: bool,
     partial: bool,
     extended_length: bool
-}
-
-named!(parse_bgp_path_attribute_flags<&[u8], BgpPathAttributeFlags>,
-    do_parse!(
-        flags: bits!(tuple!(take_bits!(u8, 1), take_bits!(u8, 1), take_bits!(u8, 1), take_bits!(u8, 1))) >>
-        (BgpPathAttributeFlags {
-            optional: flags.0 == 1,
-            transitive: flags.1 == 1,
-            partial: flags.2 == 1,
-            extended_length: flags.3 == 1
-        })
-    )
-);
-
-// BGP Path Attributes.
-
-#[derive(Debug,PartialEq)]
-struct BgpPathAttribute {
-    flags: BgpPathAttributeFlags,
-    attribute: PathAttribute,
 }
 
 #[derive(Debug,PartialEq)]
@@ -309,6 +259,58 @@ struct AggregatorAttribute {
     aggregator_id: Ipv4Addr,
 }
 
+// Extract the BGP Path Attribute Flags. Is there a nicer way to do
+// this?
+//
+// TODO: Add validation, e.g. transitive must be 1 if optional is 0,
+// and the lower 4 bits must be zero.
+//
+// Rant:
+// Why do we even have some of these flags? Think about this. The first
+// flag is the optional flag. It defines it the attribute is well knwon
+// or optional. If it's well-known, then of course by virtue of it being
+// well-known you know that from it's type code. If it's optional, then
+// similarly don't you also know it's optional from it's type code by the
+// virtue of it either being something your BGP speaker recognizes, of by
+// virtue of the fact that it doesn't but your BGP speaker recognizes all
+// of the well-known attributes. Quoting the RFC: BGP implementations MUST
+// recognize all well-known attributes. The only use for having this flag
+// is to be able to distinguish between ANY unrecognized attribute, and a
+// unrecognized attribute that you recieve which has the well-known flag
+// set. This is a pointless error, so we've added this flag, and a
+// pointless error, and made error processing more complex on top of it!
+//
+// The next bit is the Transitive bit. It is somewhat more useful as it
+// tells the BGP speaker what to do with the atribute if it doesn't
+// recognize it. When the BGP speaker receives an optional *transitive*
+// attribute it doesn't recognize it should pass it on. That's only a
+// SHOULD in the RFC. There aren't that many optional transitive
+// attributes though, why not just drop them if you don't speak them? I
+// mean really, how hard is it to add recognition for a new attribute
+// type and determine if you should transit it or not on that basis?
+//
+// The third bit is the partial bit. It defines whether the information
+// contained in the optional transitive attribute is partial. It only
+// applies to optional transitive attributes. Which aren't many, and it
+// gets set by bgp speakers that don't recognize an optional transitive
+// attribute, but decide they'll pass it on anyway. So if you don't do
+// that, you don't need this bit.
+//
+// The fourth bit is the extended length bit, it makes life difficult for
+// no reason. See further below.
+
+named!(parse_bgp_path_attribute_flags<&[u8], BgpPathAttributeFlags>,
+    do_parse!(
+        flags: bits!(tuple!(take_bits!(u8, 1), take_bits!(u8, 1), take_bits!(u8, 1), take_bits!(u8, 1))) >>
+        (BgpPathAttributeFlags {
+            optional: flags.0 == 1,
+            transitive: flags.1 == 1,
+            partial: flags.2 == 1,
+            extended_length: flags.3 == 1
+        })
+    )
+);
+
 // The length field is either one or two bytes based on the extended
 // length bit in the flags. This makes parsing more difficult than it
 // should be, just for the sake of savings a few bytes.
@@ -353,10 +355,10 @@ named!(origin_attribute<&[u8], PathAttribute>,
     )
 );
 
-named!(as_set<&[u8], Vec<u16>>, preceded!(tag!([1u8]), length_count!(be_u8, be_u16)));
-named!(as_sequence<&[u8], Vec<u16>>, preceded!(tag!([2u8]), length_count!(be_u8, be_u16)));
-named!(as_path_segment_as_vec1<&[u8], Vec<u16>>, preceded!(alt!(tag!([1u8]) | tag!([2u8])), length_count!(be_u8, be_u16)));
-named!(as_path_segment_as_vec2<&[u8], Vec<u16>>, alt!(as_set | as_sequence));
+//named!(as_set<&[u8], Vec<u16>>, preceded!(tag!([1u8]), length_count!(be_u8, be_u16)));
+//named!(as_sequence<&[u8], Vec<u16>>, preceded!(tag!([2u8]), length_count!(be_u8, be_u16)));
+//named!(as_path_segment_as_vec1<&[u8], Vec<u16>>, preceded!(alt!(tag!([1u8]) | tag!([2u8])), length_count!(be_u8, be_u16)));
+//named!(as_path_segment_as_vec2<&[u8], Vec<u16>>, alt!(as_set | as_sequence));
 
 named!(as_path_segment<&[u8], AsPathSegment>,
     do_parse!(
@@ -447,9 +449,8 @@ named!(new_as_path_attribute<&[u8], PathAttribute>,
     do_parse!(
         bits!(tag_bits!(u8, 8, 0b0100_0000)) >>
         tag!([2u8]) >> // as_path type code is 2
-        length: be_u8 >> // TODO: need to recognize extended length flag
-        as_path_segments: flat_map!(take!(length), complete!(many0!(as_path_segment))) >>
-        (PathAttribute::AsPath(Box::new(AsPathAttribute { as_path: as_path_segments })))
+        attr: as_path_attribute >>
+        (attr)
     )
 );
 
