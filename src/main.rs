@@ -17,8 +17,8 @@ use byteorder::{BigEndian, ReadBytesExt};
 #[macro_use]
 extern crate nom;
 use nom::{be_u8, be_u16, be_u32};
-use nom::IResult;
-use nom::Needed;
+use nom::{IResult, IError, Needed, ErrorKind};
+use nom::IResult::*;
 
 // We have one top level parser that calls each of the message specific
 // parsers based on a switch. When required it passes the length field
@@ -41,6 +41,24 @@ use nom::Needed;
 // to some message specific parsers seems to come from optimizing the
 // wire format in order to save a couple of bytes. A similar problem
 // arises with parsing the path attributes later.
+//
+// Nom has two types of error handling: simple and verbose. Simple is
+// the default and enables a single custom u32 to be returned. We can
+// easily encapsulate both the BGP error code and subcodes using this.
+// However, in some cases BGP requires the input data that caused the
+// error to be reported to the remote end in the Notification message.
+// To accomplish this we must use verbose error handling. With careful
+// placement of the return_error!() macro this should meet most of our
+// needs. However, it is slower, and will not help in the cases where
+// BGP expects errors to be silently ignored, but logged. For that we
+// will need to look at a separate logging capability.
+//
+// ...sigh. Nope, there is a problem with this. Again due to how we are
+// parsing the length before the type, and then validating in the type,
+// we can't return the data because it's been consumed. We will need to
+// move to parsing by peeking ahead to the type field, validating that
+// then we can properly validate the length field and return that data.
+// (I see why everyone writes hand coded BGP parsers.)
 
 // BGP messages.
 
@@ -85,19 +103,62 @@ struct BgpNotificationMessage {
 
 // Top level parser to parse all BGP messages.
 
-named!(bgp_header_marker, tag!([0xff; 16])); // or error subcode not synchronized
+/* All errors detected while processing the Message Header MUST be
+   indicated by sending the NOTIFICATION message with the Error Code
+   Message Header Error.  The Error Subcode elaborates on the specific
+   nature of the error.
+
+   The expected value of the Marker field of the message header is all
+   ones.  If the Marker field of the message header is not as expected,
+   then a synchronization error has occurred and the Error Subcode MUST
+   be set to Connection Not Synchronized.
+
+   If at least one of the following is true:
+
+      - if the Length field of the message header is less than 19 or
+        greater than 4096, or
+
+      - if the Length field of an OPEN message is less than the minimum
+        length of the OPEN message, or
+
+      - if the Length field of an UPDATE message is less than the
+        minimum length of the UPDATE message, or
+
+      - if the Length field of a KEEPALIVE message is not equal to 19,
+        or
+
+      - if the Length field of a NOTIFICATION message is less than the
+        minimum length of the NOTIFICATION message,
+
+   then the Error Subcode MUST be set to Bad Message Length.  The Data
+   field MUST contain the erroneous Length field.
+
+   If the Type field of the message header is not recognized, then the
+   Error Subcode MUST be set to Bad Message Type.  The Data field MUST
+   contain the erroneous Type field.*/
+
+// Error codes
+const MESSAGE_HEADER_ERROR: u32 = 1;
+
+// Message header error subcodes
+const CONNECTION_NOT_SYNCHRONIZED: u32 = 1;
+const BAD_MESSAGE_LENGTH: u32 = 2;
+const BAD_MESSAGE_TYPE: u32 = 3;
+
+named!(bgp_header_marker, return_error!(ErrorKind::Custom(MESSAGE_HEADER_ERROR << 8 | CONNECTION_NOT_SYNCHRONIZED), tag!([0xff; 16])));
 named!(bgp_header_length<&[u8], u16>, verify!(be_u16, |v: u16| v >= 19 && v <= 4096)); // validate per case inside each message
 named!(bgp_header_type<&[u8], u8>, verify!(be_u8, |v: u8| v >= 1 && v <= 5)); // or error subcode not recognized
 
 named!(parse_bgp_message<BgpMessage>,
     do_parse!(
         bgp_header_marker >>
-        length: bgp_header_length >>
+        length: return_error!(ErrorKind::Custom(99), bgp_header_length) >>
         message: switch!(bgp_header_type,
             1u8 => call!(parse_bgp_open) |
             2u8 => call!(parse_bgp_update, length) |
             3u8 => call!(parse_bgp_notification, length) |
-            4u8 => value!(BgpMessage::Keepalive) // TODO: need to test for valid length
+            //4u8 => value!(BgpMessage::Keepalive) // TODO: need to test for valid length
+            4u8 => call!(parse_bgp_keepalive, length)
             // put error handling for unrecognized type here, return error subcode
         ) >>
         (message)
@@ -142,6 +203,28 @@ named_args!(parse_bgp_notification(length: u16) <BgpMessage>,
         (BgpMessage::Notification(Box::new(BgpNotificationMessage { error_code: error_code, error_subcode: error_subcode })))
     )
 );
+
+// Parse BGP Keepalive message.
+
+named_args!(parse_bgp_keepalive(length: u16) <BgpMessage>,
+    do_parse!(
+        return_error!(ErrorKind::Custom(999), verify!(value!(length), |v: u16| v == 19)) >>
+        (BgpMessage::Keepalive)
+    )
+);
+
+//verify == 19 or header error and Bad Message Length and set notification data field to length
+// so what we'd box up a new bgpmessage of a notification and return it now from all our parsers?
+// fuuuuuuck
+/*
+add_return_error!(ErrorKind::Custom(42),
+                    do_parse!(
+                        tag!("efgh_") >>
+                        res: add_return_error!(ErrorKind::Custom(128), tag!("ijklx")) >>
+                        (res)
+                    )
+                )
+            )*/
 
 // Parse BGP Update message.
 
@@ -541,6 +624,16 @@ mod tests {
         let input = include_bytes!("../assets/test_bgp_keepalive1.bin");
         let slice = &input[..];
         assert_eq!(parse_bgp_message(slice), IResult::Done(&b""[..], BgpMessage::Keepalive));
+        
+        let x = &mut Vec::from(slice);
+        x[17] = 0xFF;
+        //assert_eq!(parse_bgp_message(x), Error(ErrorKind::Verify));
+        
+        match parse_bgp_message(x) {
+            IResult::Done(i, o) => { println!("Done({:?}, {:?})", i, o); },
+            IResult::Incomplete(n) => { println!("Incomplete: {:?}", n); panic!(); },
+            IResult::Error(e) => { println!("Error: {:?}", e); panic!(); }
+        }
     }
 
     #[test]
@@ -686,4 +779,25 @@ mod tests {
         let slice = &input[..];
         assert_eq!(new_aggregator_attribute(slice), IResult::Done(&b""[..], PathAttribute::Aggregator(Box::new(AggregatorAttribute { aggregator_as: 65210, aggregator_id: Ipv4Addr::new(192, 168, 0, 10) }))));
     }
+
+    /*#[test]
+    fn new_test() {
+        named!(err_test,
+            preceded!(
+                tag!("abcd_"),
+                add_return_error!(ErrorKind::Custom(42),
+                    do_parse!(
+                        tag!("efgh_") >>
+                        res: add_return_error!(ErrorKind::Custom(128), tag!("ijklx")) >>
+                        (res)
+                    )
+                )
+            )
+        );
+
+        let a = &b"abcd_efgh_ijkl_mnop"[..];
+
+        let res_a = err_test(a);
+        println!("{:?}", res_a);
+    }*/
 }
