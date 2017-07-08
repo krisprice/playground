@@ -16,9 +16,12 @@ use byteorder::{BigEndian, ReadBytesExt};
 
 #[macro_use]
 extern crate nom;
-use nom::{be_u8, be_u16, be_u32};
+use nom::{be_u8, be_u16, be_u32, error_to_list};
 use nom::{IResult, IError, Needed, ErrorKind};
 use nom::IResult::*;
+
+#[cfg(feature = "verbose-errors")]
+use nom::Err::*;
 
 // We have one top level parser that calls each of the message specific
 // parsers based on a switch. When required it passes the length field
@@ -59,6 +62,12 @@ use nom::IResult::*;
 // move to parsing by peeking ahead to the type field, validating that
 // then we can properly validate the length field and return that data.
 // (I see why everyone writes hand coded BGP parsers.)
+//
+// ...sighhhh. Nope. Let's just do what error handling we can here with
+// Nom and the rest will be done in the calling code. It might be best
+// to change the error codes from the parser to be parser specific,
+// rather than the BGP error codes, and then work out the BGP error
+// codes in the calling code.
 
 // BGP messages.
 
@@ -76,8 +85,7 @@ struct BgpOpenMessage {
     my_autonomous_system: u16,
     hold_time: u16,
     bgp_identifier: u32,
-    optional_parameters_length: u8,
-    // TODO: Implement optional parameters.
+    optional_parameters: Vec<OptionalParameter>,
 }
 
 #[derive(Debug,PartialEq)]
@@ -102,100 +110,228 @@ struct BgpNotificationMessage {
 }
 
 // Top level parser to parse all BGP messages.
+//
+// TODO: need to put these error checks in here.
+//
+// - if the Length field of an UPDATE message is less than the
+//   minimum length of the UPDATE message, or
 
-/* All errors detected while processing the Message Header MUST be
-   indicated by sending the NOTIFICATION message with the Error Code
-   Message Header Error.  The Error Subcode elaborates on the specific
-   nature of the error.
-
-   The expected value of the Marker field of the message header is all
-   ones.  If the Marker field of the message header is not as expected,
-   then a synchronization error has occurred and the Error Subcode MUST
-   be set to Connection Not Synchronized.
-
-   If at least one of the following is true:
-
-      - if the Length field of the message header is less than 19 or
-        greater than 4096, or
-
-      - if the Length field of an OPEN message is less than the minimum
-        length of the OPEN message, or
-
-      - if the Length field of an UPDATE message is less than the
-        minimum length of the UPDATE message, or
-
-      - if the Length field of a KEEPALIVE message is not equal to 19,
-        or
-
-      - if the Length field of a NOTIFICATION message is less than the
-        minimum length of the NOTIFICATION message,
-
-   then the Error Subcode MUST be set to Bad Message Length.  The Data
-   field MUST contain the erroneous Length field.
-
-   If the Type field of the message header is not recognized, then the
-   Error Subcode MUST be set to Bad Message Type.  The Data field MUST
-   contain the erroneous Type field.*/
-
-// Error codes
+// Message header error codes
 const MESSAGE_HEADER_ERROR: u32 = 1;
+const CONNECTION_NOT_SYNCHRONIZED: u32 = MESSAGE_HEADER_ERROR << 8 | 1;
+const BAD_MESSAGE_LENGTH: u32 = MESSAGE_HEADER_ERROR << 8 | 2;
+const BAD_MESSAGE_TYPE: u32 = MESSAGE_HEADER_ERROR << 8 | 3;
 
-// Message header error subcodes
-const CONNECTION_NOT_SYNCHRONIZED: u32 = 1;
-const BAD_MESSAGE_LENGTH: u32 = 2;
-const BAD_MESSAGE_TYPE: u32 = 3;
-
-named!(bgp_header_marker, return_error!(ErrorKind::Custom(MESSAGE_HEADER_ERROR << 8 | CONNECTION_NOT_SYNCHRONIZED), tag!([0xff; 16])));
-named!(bgp_header_length<&[u8], u16>, verify!(be_u16, |v: u16| v >= 19 && v <= 4096)); // validate per case inside each message
-named!(bgp_header_type<&[u8], u8>, verify!(be_u8, |v: u8| v >= 1 && v <= 5)); // or error subcode not recognized
+named!(bgp_header_marker, return_error!(ErrorKind::Custom(CONNECTION_NOT_SYNCHRONIZED), tag!([0xff; 16])));
+named!(bgp_header_length<u16>, return_error!(ErrorKind::Custom(BAD_MESSAGE_LENGTH), verify!(be_u16, |v: u16| v >= 19 && v <= 4096)));
+named!(bgp_header_type<u8>, return_error!(ErrorKind::Custom(BAD_MESSAGE_TYPE), verify!(be_u8, |v: u8| v >= 1 && v <= 5)));
 
 named!(parse_bgp_message<BgpMessage>,
     do_parse!(
         bgp_header_marker >>
-        length: return_error!(ErrorKind::Custom(99), bgp_header_length) >>
-        message: switch!(bgp_header_type,
-            1u8 => call!(parse_bgp_open) |
+        length: bgp_header_length >>
+        message_type: bgp_header_type >>
+        message: switch!(value!(message_type),
+            1u8 => call!(parse_bgp_open, length) |
             2u8 => call!(parse_bgp_update, length) |
             3u8 => call!(parse_bgp_notification, length) |
-            //4u8 => value!(BgpMessage::Keepalive) // TODO: need to test for valid length
             4u8 => call!(parse_bgp_keepalive, length)
-            // put error handling for unrecognized type here, return error subcode
+        ) >>
+        (message)
+    )
+);
+
+// Let's try out a design using peek!().
+
+named!(peek_for_type<u8>, do_parse!(res: peek!(preceded!(bgp_header_length, bgp_header_type)) >> (res)));
+
+named!(new_parse_bgp_message<BgpMessage>,
+    do_parse!(
+        bgp_header_marker >>
+        message: switch!(peek_for_type,
+            1u8 => call!(new_parse_bgp_open) |
+            //2u8 => call!(parse_bgp_update, length) |
+            //3u8 => call!(parse_bgp_notification, length) |
+            4u8 => call!(new_parse_bgp_keepalive)
         ) >>
         (message)
     )
 );
 
 // Parse BGP Open message.
+//
+// The following validation needs to be done for Open Messages. Much of
+// these will need to be handled in the calling code.
+//
+// UNSUPPORTED_VERSION_NUMBER: We will only support version 4, like most
+// implementations out there. The data field of the Notification message
+// must be set to the smallest or highest supported version, in our case
+// that's always 4. This will need to be handled in the calling code but
+// we can add a verification and return an error to the caller here.
+//
+// BAD_PEER_AS: This occurs when the AS is unexpected, usualy due to the
+// local configuration of the peer. This must be checked by the calling
+// code. Otherwise we would need to pass in configuration parameters to
+// the parser to do this kind of verification. That might be considered
+// in a later revision.
+//
+// BAD_BGP_IDENTIFIER: This must be a valid unicast IP host address. We
+// can validate that here, so we will.
+//
+// UNSUPPORTED_OPTIONAL_PARAMETER: not implemented yet.
+//
+// UNACCEPTABLE_HOLD_TIME: The RFC requires rejecting hold timers of 1
+// and 2 seconds. Any further rejection is based on configuration, and
+// must be done in the calling code.
+//
+// UNSUPPORTED_CAPABILITY: In this case the data field should list the
+// set of capabilities that caused the error. We have implemented this
+// in the parser for now without the data field, but it might be best
+// for this verification to be done in the calling code so that it can
+// easily return all the failing capabilities in one Notification.
 
-// TODO: Implement proper validation.
-// TODO: Implement optional parameters.
+const OPEN_MESSAGE_ERROR: u32 = 2;
+const UNSUPPORTED_VERSION_NUMBER: u32 = OPEN_MESSAGE_ERROR << 8 | 1;
+const BAD_PEER_AS: u32 = OPEN_MESSAGE_ERROR << 8 | 2;
+const BAD_BGP_IDENTIFIER: u32 = OPEN_MESSAGE_ERROR << 8 | 3;
+const UNSUPPORTED_OPTIONAL_PARAMETER: u32 = OPEN_MESSAGE_ERROR << 8 | 4;
+const UNACCEPTABLE_HOLD_TIME: u32 = OPEN_MESSAGE_ERROR << 8 | 6;
+const UNSUPPORTED_CAPABILITY: u32 = OPEN_MESSAGE_ERROR << 8 | 7;
 
-named!(parse_bgp_open<&[u8], BgpMessage>,
+named!(bgp_version<u8>, return_error!(ErrorKind::Custom(UNSUPPORTED_VERSION_NUMBER), verify!(be_u8, |v: u8| v == 4)));
+named!(bgp_hold_time<u16>, return_error!(ErrorKind::Custom(UNACCEPTABLE_HOLD_TIME), verify!(be_u16, |v: u16| v == 0 || v >= 3))); // Hold Time can be zero
+// TODO: This should return an IPAddr type.
+named!(bgp_identifier<u32>, return_error!(ErrorKind::Custom(BAD_BGP_IDENTIFIER), verify!(be_u32, |v: u32| v < 0xE0000000)));
+
+named_args!(parse_bgp_open(length: u16) <BgpMessage>,
     do_parse!(
-        version: verify!(be_u8, |v: u8| v == 4) >>
+        return_error!(ErrorKind::Custom(BAD_MESSAGE_LENGTH), verify!(value!(length), |v: u16| v >= 29)) >>
+        version: bgp_version >>
         my_autonomous_system: be_u16 >>
-        hold_time: be_u16 >>
-        bgp_identifier: be_u32 >>
+        hold_time: bgp_hold_time >>
+        bgp_identifier: bgp_identifier >>
         optional_parameters_length: be_u8 >>
+        optional_parameters: flat_map!(take!(optional_parameters_length), complete!(many0!(parse_optional_parameter))) >>
         (BgpMessage::Open(
             Box::new(BgpOpenMessage{
                 version: version,
                 my_autonomous_system: my_autonomous_system,
                 hold_time: hold_time,
                 bgp_identifier: bgp_identifier,
-                optional_parameters_length: optional_parameters_length,
+                optional_parameters: optional_parameters,
             })
         ))
     )
 );
 
-// Parse BGP Notification message.
+named!(new_parse_bgp_open<BgpMessage>,
+    do_parse!(
+        return_error!(ErrorKind::Custom(BAD_MESSAGE_LENGTH), verify!(be_u16, |v: u16| v >= 29)) >>
+        tag!([1u8]) >> // type code
+        version: bgp_version >>
+        my_autonomous_system: be_u16 >>
+        hold_time: bgp_hold_time >>
+        bgp_identifier: bgp_identifier >>
+        optional_parameters_length: be_u8 >>
+        optional_parameters: flat_map!(take!(optional_parameters_length), complete!(many0!(parse_optional_parameter))) >>
+        (BgpMessage::Open(
+            Box::new(BgpOpenMessage{
+                version: version,
+                my_autonomous_system: my_autonomous_system,
+                hold_time: hold_time,
+                bgp_identifier: bgp_identifier,
+                optional_parameters: optional_parameters,
+            })
+        ))
+    )
+);
 
-// TODO: Implement proper validation. And implement proper handling of
-// the data field.
+#[derive(Debug,PartialEq)]
+enum OptionalParameter {
+    Capability(Vec<CapabilityParameter>),
+}
+
+#[derive(Debug,PartialEq)]
+enum CapabilityParameter {
+    MultiprotocolExtensions(Box<MultiprotocolExtensionsCapability>),
+    RouteRefresh,
+}
+
+#[derive(Debug,PartialEq)]
+struct MultiprotocolExtensionsCapability {
+    afi: u16,
+    safi: u8,
+}
+
+// This indirection is redundant since there is only one current type of
+// optional parameter, but for completeness we'll do it this way.
+named!(parse_optional_parameter<OptionalParameter>,
+    return_error!(ErrorKind::Custom(UNSUPPORTED_OPTIONAL_PARAMETER), alt!(optional_parameter_capability))
+);
+
+named!(optional_parameter_capability<OptionalParameter>,
+    do_parse!(
+        tag!([2u8]) >>
+        length: be_u8 >>
+        capability: flat_map!(take!(length), complete!(many0!(parse_capability_parameter))) >>
+        (OptionalParameter::Capability(capability))
+    )
+);
+
+// TODO: For some reason the UNSUPPORTED_CAPABILITY error isn't returned
+// when the alt!() doesn't have a match. This leads to just returning an
+// empty Capability. Might be possible Nom bug, raised on gitter.
+named!(parse_capability_parameter<CapabilityParameter>,
+    return_error!(ErrorKind::Custom(UNSUPPORTED_CAPABILITY), alt!(multiprotocol_extensions_capability | route_refresh_capability))
+);
+
+// TODO: Validate the AFI and SAFI here?
+named!(multiprotocol_extensions_capability<CapabilityParameter>,
+    do_parse!(
+        tag!([1u8]) >> // type code
+        tag!([4u8]) >> // lengh should always be four
+        afi: be_u16 >> // TODO: Validation.
+        take!(1) >> // reserved byte
+        safi: be_u8 >> // TODO: Validation.
+        (CapabilityParameter::MultiprotocolExtensions(Box::new(MultiprotocolExtensionsCapability { afi: afi, safi: safi })))
+    )
+);
+
+named!(route_refresh_capability<CapabilityParameter>,
+    do_parse!(
+        tag!([2u8]) >> // type code
+        tag!([0u8]) >> // length should always be zero
+        (CapabilityParameter::RouteRefresh)
+    )
+);
+
+// Parse BGP Keepalive message.
+//
+// The length of a Keepalive must always be 19. The calling code will
+// need to add the erroneous length to the data field of the generated
+// Notification. For now there is no tidy way to do this in Nom so we
+// skip handling that here.
+
+named_args!(parse_bgp_keepalive(length: u16) <BgpMessage>,
+    do_parse!(
+        return_error!(ErrorKind::Custom(BAD_MESSAGE_LENGTH), verify!(value!(length), |v: u16| v == 19)) >>
+        (BgpMessage::Keepalive)
+    )
+);
+
+named!(new_parse_bgp_keepalive<BgpMessage>,
+    do_parse!(
+        return_error!(ErrorKind::Custom(BAD_MESSAGE_LENGTH), verify!(be_u16, |v: u16| v == 19)) >>
+        tag!([4u8]) >>
+        (BgpMessage::Keepalive)
+    )
+);
+
+// Parse BGP Notification message.
 
 named_args!(parse_bgp_notification(length: u16) <BgpMessage>,
     do_parse!(
+        return_error!(ErrorKind::Custom(BAD_MESSAGE_LENGTH), verify!(value!(length), |v: u16| v >= 21)) >>
         error_code: verify!(be_u8, |v: u8| v >= 1 && v <= 6) >>
         // TODO: The possible error_subcodes depend on the error_code.
         error_subcode: verify!(be_u8, |v: u8| v >= 1 && v <= 11) >>
@@ -203,28 +339,6 @@ named_args!(parse_bgp_notification(length: u16) <BgpMessage>,
         (BgpMessage::Notification(Box::new(BgpNotificationMessage { error_code: error_code, error_subcode: error_subcode })))
     )
 );
-
-// Parse BGP Keepalive message.
-
-named_args!(parse_bgp_keepalive(length: u16) <BgpMessage>,
-    do_parse!(
-        return_error!(ErrorKind::Custom(999), verify!(value!(length), |v: u16| v == 19)) >>
-        (BgpMessage::Keepalive)
-    )
-);
-
-//verify == 19 or header error and Bad Message Length and set notification data field to length
-// so what we'd box up a new bgpmessage of a notification and return it now from all our parsers?
-// fuuuuuuck
-/*
-add_return_error!(ErrorKind::Custom(42),
-                    do_parse!(
-                        tag!("efgh_") >>
-                        res: add_return_error!(ErrorKind::Custom(128), tag!("ijklx")) >>
-                        (res)
-                    )
-                )
-            )*/
 
 // Parse BGP Update message.
 
@@ -587,23 +701,128 @@ mod tests {
     use super::*;
     use nom::{HexDisplay, IResult};
 
+    // Open message
+
     #[test]
-    fn parse_bgp_open_test() {
+    fn parse_bgp_open_test1() {
         let input = include_bytes!("../assets/test_bgp_open1.bin");
-        let slice = &input[19..];
-        assert_eq!(parse_bgp_open(slice),
-            IResult::Done(&b""[..], BgpMessage::Open(Box::new(BgpOpenMessage { version: 4, my_autonomous_system: 65033, hold_time: 180, bgp_identifier: 3232235535, optional_parameters_length: 0 })))
-        );
+        let slice = &input[..];
+
+        let msg = BgpMessage::Open(Box::new(
+            BgpOpenMessage { version: 4, my_autonomous_system: 65033, hold_time: 180, bgp_identifier: 3232235535, optional_parameters: vec![] }
+        ));
+
+        let res = Done(&b""[..], msg);
+
+        assert_eq!(parse_bgp_message(slice), res);
+        assert_eq!(new_parse_bgp_message(slice), res);
+
+        let x = &mut Vec::from(slice);
+        x[17] = 28u8;
+
+        let old_err = match parse_bgp_message(x) { IResult::Error(e) => e, _ => unreachable!(), };
+        let new_err = match new_parse_bgp_message(x) { IResult::Error(e) => e, _ => unreachable!(), };
+
+        assert_eq!(error_to_list(&old_err), vec![ErrorKind::Switch, ErrorKind::Custom(258), ErrorKind::Verify]);    
+        assert_eq!(error_to_list(&new_err), vec![ErrorKind::Switch, ErrorKind::Custom(258), ErrorKind::Verify]);
     }
 
     #[test]
-    fn parse_bgp_open_full_test() {
-        let input = include_bytes!("../assets/test_bgp_open1.bin");
+    fn parse_bgp_open_test3() {
+        let input = include_bytes!("../assets/test_bgp_open3.bin");
         let slice = &input[..];
-        assert_eq!(parse_bgp_message(slice),
-            IResult::Done(&b""[..], BgpMessage::Open(Box::new(BgpOpenMessage { version: 4, my_autonomous_system: 65033, hold_time: 180, bgp_identifier: 3232235535, optional_parameters_length: 0 })))
-        );
+
+        let optional_parameters = vec![
+            OptionalParameter::Capability(vec![CapabilityParameter::MultiprotocolExtensions(Box::new(MultiprotocolExtensionsCapability { afi: 1, safi: 1 }))]),
+            OptionalParameter::Capability(vec![]),
+            OptionalParameter::Capability(vec![CapabilityParameter::RouteRefresh])
+        ];
+
+        let msg = BgpMessage::Open(Box::new(
+            BgpOpenMessage { version: 4, my_autonomous_system: 65200, hold_time: 180, bgp_identifier: 169083649, optional_parameters: optional_parameters }
+        ));
+
+        let res = Done(&b""[..], msg);
+
+        assert_eq!(parse_bgp_message(slice), res);
+        assert_eq!(new_parse_bgp_message(slice), res);
     }
+
+    // Optional parameters
+
+    #[test]
+    fn parse_optional_parameters_test() {
+        let input = include_bytes!("../assets/test_bgp_optional_parameters1.bin");        
+        let slice = &input[..];
+
+        named!(many0_optional_parameters<Vec<OptionalParameter>>, many0!(parse_optional_parameter));
+
+        let optional_parameters = vec![
+            OptionalParameter::Capability(vec![CapabilityParameter::MultiprotocolExtensions(Box::new(MultiprotocolExtensionsCapability { afi: 1, safi: 1 }))]),
+            OptionalParameter::Capability(vec![]),
+            OptionalParameter::Capability(vec![CapabilityParameter::RouteRefresh])
+        ];
+        
+        assert_eq!(many0_optional_parameters(slice), Done(&b""[..], optional_parameters));
+    }
+
+    // Capability parameters
+
+    #[test]
+    fn parse_capability_parameters_test() {
+        let input = include_bytes!("../assets/test_bgp_capabilty_multiprotocol1.bin");        
+        let slice = &input[..];
+
+        named!(many0_capability_parameters<Vec<CapabilityParameter>>, many0!(parse_capability_parameter));
+
+        // TODO: Get sample of capability optional parameter that has
+        // multiple capabilities in it.
+        let capability_parameters = vec![
+            CapabilityParameter::MultiprotocolExtensions(Box::new(MultiprotocolExtensionsCapability { afi: 1, safi: 1 })),
+        ];
+        
+        assert_eq!(many0_capability_parameters(slice), Done(&b""[..], capability_parameters));
+    }
+
+    #[test]
+    fn multiprotocol_extensions_capability_test() {
+        let input = include_bytes!("../assets/test_bgp_capabilty_multiprotocol1.bin");        
+        let slice = &input[..];
+
+        assert_eq!(multiprotocol_extensions_capability(slice), Done(&b""[..],
+            CapabilityParameter::MultiprotocolExtensions(Box::new(MultiprotocolExtensionsCapability { afi: 1, safi: 1, }))));
+    }
+
+    #[test]
+    fn route_refresh_capability_test() {
+        let input = include_bytes!("../assets/test_bgp_capabilty_route_refresh1.bin");
+        let slice = &input[..];
+
+        assert_eq!(route_refresh_capability(slice), Done(&b""[..],
+            CapabilityParameter::RouteRefresh));
+    }
+
+    // Keepalive message
+    
+    #[test]
+    fn parse_bgp_keepalive_test() {
+        let input = include_bytes!("../assets/test_bgp_keepalive1.bin");
+        let slice = &input[..];
+
+        assert_eq!(parse_bgp_message(slice), IResult::Done(&b""[..], BgpMessage::Keepalive));
+        assert_eq!(new_parse_bgp_message(slice), IResult::Done(&b""[..], BgpMessage::Keepalive));
+
+        let x = &mut Vec::from(slice);
+        x[16] = 1u8;
+
+        let old_err = match parse_bgp_message(x) { IResult::Error(e) => e, _ => unreachable!(), };
+        let new_err = match new_parse_bgp_message(x) { IResult::Error(e) => e, _ => unreachable!(), };
+        assert_eq!(error_to_list(&old_err), vec![ErrorKind::Switch, ErrorKind::Custom(258), ErrorKind::Verify]);    
+        assert_eq!(error_to_list(&new_err), vec![ErrorKind::Switch, ErrorKind::Custom(258), ErrorKind::Verify]);
+    }
+
+
+    // Notification message
 
     #[test]
     fn parse_bgp_notification_test() {
@@ -617,23 +836,6 @@ mod tests {
         let input = include_bytes!("../assets/test_bgp_notification1.bin");
         let slice = &input[..];
         assert_eq!(parse_bgp_message(slice), IResult::Done(&b""[..], BgpMessage::Notification(Box::new(BgpNotificationMessage { error_code: 2, error_subcode: 2 }))));
-    }
-
-    #[test]
-    fn parse_bgp_keepalive_test() {
-        let input = include_bytes!("../assets/test_bgp_keepalive1.bin");
-        let slice = &input[..];
-        assert_eq!(parse_bgp_message(slice), IResult::Done(&b""[..], BgpMessage::Keepalive));
-        
-        let x = &mut Vec::from(slice);
-        x[17] = 0xFF;
-        //assert_eq!(parse_bgp_message(x), Error(ErrorKind::Verify));
-        
-        match parse_bgp_message(x) {
-            IResult::Done(i, o) => { println!("Done({:?}, {:?})", i, o); },
-            IResult::Incomplete(n) => { println!("Incomplete: {:?}", n); panic!(); },
-            IResult::Error(e) => { println!("Error: {:?}", e); panic!(); }
-        }
     }
 
     #[test]
@@ -780,24 +982,73 @@ mod tests {
         assert_eq!(new_aggregator_attribute(slice), IResult::Done(&b""[..], PathAttribute::Aggregator(Box::new(AggregatorAttribute { aggregator_as: 65210, aggregator_id: Ipv4Addr::new(192, 168, 0, 10) }))));
     }
 
+    
     /*#[test]
-    fn new_test() {
-        named!(err_test,
-            preceded!(
-                tag!("abcd_"),
-                add_return_error!(ErrorKind::Custom(42),
-                    do_parse!(
-                        tag!("efgh_") >>
-                        res: add_return_error!(ErrorKind::Custom(128), tag!("ijklx")) >>
-                        (res)
-                    )
-                )
+    fn err_test() {
+
+        named!(child1, add_return_error!(ErrorKind::Custom(123), tag!("x")));
+        named!(err_test_alt, alt!(tag!("z") | child1));
+        named!(err_test_sw, switch!(take!(1), b"a" => call!(child1)));
+            
+        let x = &b"abc"[..];
+        println!("{:?}", err_test_alt(x));
+        println!("{:?}", err_test_sw(x));
+
+        // Outputs:
+        // Error(Position(Alt, [97, 98, 99]))
+        // Error(NodePosition(Switch, [97, 98, 99], [Position(Tag, [98, 99]), Position(Custom(123), [98, 99])]))
+
+        
+        named!(consume_then_switch,
+            do_parse!(
+                take!(1) >> // skip
+                code: be_u8 >>
+                value: switch!(value!(code),
+                    1u8 => call!(len_val)
+                ) >>
+                (value)
             )
         );
 
-        let a = &b"abcd_efgh_ijkl_mnop"[..];
 
-        let res_a = err_test(a);
-        println!("{:?}", res_a);
+        named!(peek_type<u8>, do_parse!(res: peek!(preceded!(take!(2), be_u8)) >> (res)));
+        named!(peek_then_switch,
+            do_parse!(
+                tag!([0xFF]) >> // marker
+                code: peek_type >>
+                value: switch!(value!(code),
+                    1u8 => call!(length_type_value)
+                ) >>
+                (value)
+            )
+        );
+
+        named!(len_val, do_parse!(
+            length: return_error!(ErrorKind::Custom(123), verify!(be_u16, |v: u16| v <= 2)) >>
+            value: take!(length) >>
+            (value)
+        ));
+
+        named!(length_type_value, do_parse!(
+            length: return_error!(ErrorKind::Custom(123), verify!(be_u16, |v: u16| v <= 2)) >>
+            tag!([1u8]) >> // consume type code
+            value: take!(length) >>
+            (value)
+        ));
+
+        let x: &mut [u8] = &mut [0xFF, 0, 2, 1, 0xFF, 0xFF];
+
+        //println!("consume_then_switch: {:?}", consume_then_switch(x));
+        println!("peek_type: {:?}", peek_type(x));
+        println!("peek_then_switch: {:?}", peek_then_switch(x));
+
+        //consume_then_switch: Error(NodePosition(Switch, [0, 1, 255, 255], [Position(Verify, [0, 1, 255, 255]), Position(Custom(123), [0, 1, 255, 255])]))
+        //peek_then_switch: Error(NodePosition(Switch, [1, 0, 1, 255, 255], [Position(Verify, [0, 1, 255, 255]), Position(Custom(123), [0, 1, 255, 255])]))
+
+        x[1] = 99;
+
+        //println!("consume_then_switch: {:?}", consume_then_switch(x));
+        println!("peek_type: {:?}", peek_type(x));
+        println!("peek_then_switch: {:?}", peek_then_switch(x));    
     }*/
 }
