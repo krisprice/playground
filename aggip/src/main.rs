@@ -3,6 +3,7 @@
 #![allow(unused_imports)]
 #![allow(unused_variables)]
 
+use std::cmp::{min, max};
 use std::net::{Ipv4Addr};
 
 // TODO: Implement a proper test suite.
@@ -120,6 +121,71 @@ fn run_method1_rev(prefixes: &Vec<Ipv4Prefix>) -> Vec<Ipv4Prefix> {
     prefixes
 }
 
+// Method 2. Treat the prefixes as integer intervals. Mergse these
+// regardless of valid network boundaries. Then split these merged
+// intervals back into valid networks.
+
+fn run_method2(prefixes: &Vec<Ipv4Prefix>) -> Vec<Ipv4Prefix> {
+    // TODO: convert from using u32 to IpAddr types?
+    let mut intervals: Vec<(u32, u32)> = prefixes.iter().map(|x| (x.start(), x.end()+1)).collect();
+    intervals.sort();
+
+    // TODO: Would reversing this loop to run from back to front be
+    // better? Should avoid the use of continue, and probably be more
+    // efficient as the vector doesn't need to move elements, and the
+    // intervals.len() doesn't need to change on each iteration.
+
+    let mut i = 0;
+    while i < intervals.len() - 1 {
+        let (p1_start, p1_end) = intervals[i];
+        let (p2_start, p2_end) = intervals[i+1];
+
+        if p1_end >= p2_start {
+            intervals[i+1].0 = min(p1_start, p2_start);
+            intervals[i+1].1 = max(p1_end, p2_end);
+            intervals.remove(i);
+            continue;
+        }
+        i+=1
+    }
+
+    let mut prefixes: Vec<Ipv4Prefix> = Vec::new();
+    for (start, end) in intervals {
+        let subnets = interval_to_subnets(start, end);
+        //println!("start = {} end = {} subnets = {:?}", start, end, subnets);
+        prefixes.extend(subnets);
+    }   
+    prefixes
+}
+
+// TODO: Get rid of all hard coded integer sizes, e.g. 32 below.
+fn get_first_subnet(start: u32, end: u32) -> Ipv4Prefix {
+    let r = end - start;
+    let n = 32 - r.leading_zeros() - 1;
+    let num_bits = min(n, start.trailing_zeros());
+    //println!("start = {} end = {} r = {} n = {} num_bits = {}", start, end, r, n, num_bits);
+    
+    // TODO: See todo at Ipv4Prefix about making a constructor so we can
+    // create prefixes using something like:
+    //   Ipv4Prefix::new(start, 32 - num_bits);
+    
+    Ipv4Prefix {
+        address: Ipv4Addr::from(start),
+        length: (32 - num_bits) as u8,
+    }
+}
+
+fn interval_to_subnets(start: u32, end: u32) -> Vec<Ipv4Prefix> {
+    let mut subnets: Vec<Ipv4Prefix> = Vec::new();
+    let mut new_start = start;
+    while new_start < end {
+        let subnet = get_first_subnet(new_start, end);
+        new_start = subnet.end()+1;
+        subnets.push(subnet);
+    }
+    subnets
+}
+
 fn main() {
     // Unordered list of prefixes. Just assume we have read this from a
     // file or database.
@@ -148,10 +214,14 @@ fn main() {
 
     let prefixes1 = run_method1(&prefixes);
     let prefixes1_rev = run_method1_rev(&prefixes);
+    let prefixes2 = run_method2(&prefixes);
 
     println!("\nMethod 1:\n");
     print_prefixes(&prefixes1);
 
     println!("\nMethod 1 rev:\n");
     print_prefixes(&prefixes1_rev);
+
+    println!("\nMethod 2:\n");
+    print_prefixes(&prefixes2);
 }
