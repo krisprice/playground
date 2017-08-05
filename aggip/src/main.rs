@@ -12,8 +12,14 @@ use std::net::{Ipv4Addr};
 // we delete the children and turn that parent node into the aggregate.
 // Doing it this way seems more elegant, and saves repeatedly looping
 // over a merge function.
+//
+// TODO: Fix Ipv4Prefix up so that its pub and precompute private vars
+// for start, end, etc. Also make it generic for IPv4 and IPv6. Make the
+// constructor take a single string in the format 'addr/len' instead, or
+// an integer for a single /32. Add a method for setting prefix so we can
+// build a prefix from an int and chain fluently to set the prefix.
 
-#[derive(Debug,PartialEq,Eq,PartialOrd,Ord)]
+#[derive(Debug,PartialEq,Eq,PartialOrd,Ord,Clone)]
 struct Ipv4Prefix {
     address: Ipv4Addr,
     length: u8,
@@ -54,36 +60,70 @@ impl Ipv4Prefix {
 // return a new vector of the merged prefixes. At the moment this is
 // modifying the original vector.
 
-fn merge_prefixes(prefixes: &mut Vec<Ipv4Prefix>) {  
-    let mut i = 0;
-    while i < prefixes.len() {
-        println!("{:?}", prefixes[i]);
-        
-        while i+1 < prefixes.len() {
-            println!("\t{:?}", prefixes[i+1]);
+fn run_method1(prefixes: &Vec<Ipv4Prefix>) -> Vec<Ipv4Prefix> {
+    // Clone the input prefix list since we'll be modifying it.
+    let mut prefixes = prefixes.clone();
 
-            // We know that q.start() is always greater than p.start()
-            // because we sorted our prefixes earlier.
-            if prefixes[i+1].end() <= prefixes[i].end() {
-                println!("\tp contains q, removing q");
-                prefixes.remove(i+1);
+    // Sort by the truncated address and length. We don't need to
+    // include the address in the key, but it will reduce confusion
+    // when people see the output and see prefixes with non-subnet
+    // addresses out of order.
+    prefixes.sort_by_key(|k| (k.start(), k.address, k.length));
+
+    let mut prev_len = 0;
+    while prefixes.len() != prev_len {
+        prev_len = prefixes.len();
+    
+        let mut i = 0;
+        while i < prefixes.len() {
+            while i+1 < prefixes.len() {
+                if prefixes[i+1].end() <= prefixes[i].end() {
+                    prefixes.remove(i+1);
+                }
+                else if prefixes[i+1].start() <= prefixes[i].end()+1 && prefixes[i+1].end() == prefixes[i].expanded().end() {
+                    prefixes[i] = prefixes[i].expanded();
+                    prefixes.remove(i+1);
+                }
+                else { break; }
             }
-            // TODO: Not sure this is bug free. Need to think it through and write some proper tests.
-            else if prefixes[i+1].start() <= prefixes[i].end()+1 && prefixes[i+1].end() == prefixes[i].expanded().end() {
-                println!("\tp.expanded() contains q, removing q");
-                prefixes[i] = prefixes[i].expanded();
-                prefixes.remove(i+1);
-            }
-            else { break; }
+            i += 1;
         }
-        i += 1;
     }
+
+    prefixes
+}
+
+/// Method 1 done with a reverse loop (see aggip.py)
+
+fn run_method1_rev(prefixes: &Vec<Ipv4Prefix>) -> Vec<Ipv4Prefix> {
+    let mut prefixes = prefixes.clone();
+    //prefixes.sort_by_key(|k| (k.start(), k.address, k.length));
+    //prefixes.reverse();
+    prefixes.sort_by(|a, b| b.cmp(a));
+
+    let mut prev_len = 0;
+    while prefixes.len() != prev_len {
+        prev_len = prefixes.len();
+    
+        let mut i = prefixes.len() - 1;
+        while i >= 1 {
+            if prefixes[i].end() >= prefixes[i-1].end() {
+                prefixes[i-1] = prefixes.remove(i);
+            }
+            else if prefixes[i].end()+1 >= prefixes[i-1].start() && prefixes[i].expanded().end() == prefixes[i-1].end() {
+                prefixes[i-1] = prefixes.remove(i).expanded();
+            }
+            i -= 1;
+        }
+    }
+
+    prefixes
 }
 
 fn main() {
     // Unordered list of prefixes. Just assume we have read this from a
     // file or database.
-    let mut prefixes = vec![
+    let prefixes = vec![
         Ipv4Prefix::new("10.0.2.0", 24),
         Ipv4Prefix::new("10.0.1.1", 24),
         Ipv4Prefix::new("10.1.1.0", 24),
@@ -97,31 +137,21 @@ fn main() {
         Ipv4Prefix::new("192.168.3.0", 24),
     ];
 
-    // Sort by the truncated address and length. We don't need to
-    // include the address in the key, but it will reduce confusion
-    // when people see the output and see prefixes with non-subnet
-    // addresses out of order.
-    prefixes.sort_by_key(|k| (k.start(), k.address, k.length));
+    fn print_prefixes(prefixes: &Vec<Ipv4Prefix>) {
+        for p in prefixes {
+            println!("\t{}/{} u32: {} start: {} end: {}", p.address, p.length, u32::from(p.address), p.start(), p.end());
+        }
+    }    
+    
+    println!("\nBefore aggregation:\n");
+    print_prefixes(&prefixes);
 
-    // Print before.
-    println!("\nHere's our sorted data before aggregation:\n");
-    for p in &prefixes {
-        println!("\t{}/{} u32: {} start: {} end: {}", p.address, p.length, u32::from(p.address), p.start(), p.end());
-    }
-    println!();
+    let prefixes1 = run_method1(&prefixes);
+    let prefixes1_rev = run_method1_rev(&prefixes);
 
-    // Merge.
-    // TODO: Ick, do we need to waste a whole iteration just to find out we are done? 
-    let mut prev_len = 0;
-    while prefixes.len() != prev_len {
-        prev_len = prefixes.len();
-        merge_prefixes(&mut prefixes);
-    }
+    println!("\nMethod 1:\n");
+    print_prefixes(&prefixes1);
 
-    // Print after.
-    println!("\nHere's our data after aggregation:\n");
-    for p in &prefixes {
-        println!("\t{}/{} {} start: {} end: {}", p.address, p.length, u32::from(p.address), p.start(), p.end());
-    }
-    println!();
+    println!("\nMethod 1 rev:\n");
+    print_prefixes(&prefixes1_rev);
 }
