@@ -70,11 +70,11 @@ def run_method1_rev(prefixes):
 
 from collections import deque
 
-def reduce_prefixes(prefixes):
-    """Expects input prefixes to be a sorted deque. Consumes the
-    input. Returns a new deque as the result."""
-    merged = deque()
+def reduce_prefixes_deque(prefixes):
+    """Expects input prefixes to be a sorted deque. Consumes the input.
+    Returns a new sorted deque as the result."""
 
+    merged = deque()
     p = prefixes.popleft()
     pp = p.supernet()
     
@@ -92,7 +92,7 @@ def reduce_prefixes(prefixes):
     merged.append(p)
     return merged
 
-def run_method_linked_list(prefixes):
+def run_method_deque(prefixes):
     """Using a linked list should be faster because we're deleting items
     in the middle of the list a lot. There isn't a pure linked list in
     Python so I'm using a deque which is backed by one. Doing it naively
@@ -105,7 +105,47 @@ def run_method_linked_list(prefixes):
     prev_len = 0
     while len(prefixes) != prev_len:
         prev_len = len(prefixes)
-        prefixes = reduce_prefixes(prefixes)
+        prefixes = reduce_prefixes_deque(prefixes)
+    
+    return prefixes
+
+
+def reduce_prefixes_list(prefixes):
+    """Expects input prefixes to be a sorted list. Consumes the input.
+    Returns a new sorted list as the result."""
+    
+    merged = []
+    prefixes.reverse()
+    p = prefixes.pop()
+    pp = p.supernet()
+
+    while prefixes:
+        next_p = prefixes.pop()
+        if p.broadcast_address >= next_p.broadcast_address:
+            continue
+        elif p.broadcast_address+1 >= next_p.network_address and pp.broadcast_address == next_p.broadcast_address:
+            p = pp
+        else:
+            merged.append(p)
+            p = next_p
+            pp = p.supernet()
+    
+    merged.append(p)
+    return merged
+
+def run_method1_list(prefixes):
+    """Then again, if we're not really able to use a proper linked list
+    to delete items in the middle, and we're just consuming the input
+    list to generate a new list on each pass, using plain old lists is
+    probably faster for that. Reverse the sort so we can pop() off the
+    end of the list as we go."""
+
+    prefixes = sorted(prefixes) # Take a copy
+    
+    prev_len = 0
+    while len(prefixes) != prev_len:
+        prev_len = len(prefixes)
+        prefixes = reduce_prefixes_list(prefixes)
     
     return prefixes
 
@@ -175,7 +215,8 @@ if __name__ == "__main__":
     
     prefixes1 = run_method1(prefixes)
     prefixes1_rev = run_method1_rev(prefixes)
-    prefixes_ll = run_method_linked_list(prefixes)
+    prefixes_deque = run_method_deque(prefixes)
+    prefixes1_list = run_method1_list(prefixes)
     prefixes2 = run_method2(prefixes)
 
     def print_prefixes(prefixes):
@@ -192,7 +233,10 @@ if __name__ == "__main__":
     print_prefixes(prefixes1_rev)
 
     print("After merge using linked list:")
-    print_prefixes(prefixes_ll)
+    print_prefixes(prefixes_deque)
+
+    print("After merge method 1 using list:")
+    print_prefixes(prefixes1_list)
 
     print("After merge method 2:")
     print_prefixes(prefixes2)
@@ -213,5 +257,6 @@ if __name__ == "__main__":
     #cProfile.run('run_method1(prefixes)', sort='tottime')    
     #cProfile.run('run_method2(prefixes)', sort='tottime')
     #cProfile.run('run_method1_rev(prefixes)', sort='tottime')
-    #cProfile.run('run_method_linked_list(prefixes)', sort='tottime')
+    #cProfile.run('run_method_deque(prefixes)', sort='tottime')
+    #cProfile.run('run_method1_list(prefixes)', sort='tottime')
     
