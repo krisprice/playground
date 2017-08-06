@@ -42,8 +42,9 @@ def run_method1(prefixes):
 
 def run_method1_rev(prefixes):
     """Try going the reverse direction through the list so we aren't
-    deleting elements from the begining, which would seem to be more
-    compute intensive."""
+    deleting elements from the begining. This won't save much, but if
+    the last prefix is large we save a small amount of work moving items
+    in the list."""
 
     # Take a copy, so we don't modify the original.
     prefixes = sorted(prefixes, reverse=True)
@@ -67,6 +68,46 @@ def run_method1_rev(prefixes):
             i-=1
     return prefixes
 
+from collections import deque
+
+def reduce_prefixes(prefixes):
+    """Expects input prefixes to be a sorted deque. Consumes the
+    input. Returns a new deque as the result."""
+    merged = deque()
+
+    p = prefixes.popleft()
+    pp = p.supernet()
+    
+    while prefixes:
+        next_p = prefixes.popleft()
+        if p.broadcast_address >= next_p.broadcast_address:
+            continue
+        elif p.broadcast_address+1 >= next_p.network_address and pp.broadcast_address == next_p.broadcast_address:
+            p = pp
+        else:
+            merged.append(p)
+            p = next_p
+            pp = p.supernet()
+    
+    merged.append(p)
+    return merged
+
+def run_method_linked_list(prefixes):
+    """Using a linked list should be faster because we're deleting items
+    in the middle of the list a lot. There isn't a pure linked list in
+    Python so I'm using a deque which is backed by one. Doing it naively
+    with indexes doesn't work well because deque seems to scan through
+    the list. Working with regular style of linked list using pointers is
+    ideally what we want, but in lieu of that we have this implementation
+    which consumes one deque to build the next."""
+    prefixes = deque(sorted(prefixes))
+    
+    prev_len = 0
+    while len(prefixes) != prev_len:
+        prev_len = len(prefixes)
+        prefixes = reduce_prefixes(prefixes)
+    
+    return prefixes
 
 def trailing_zeros(n):
     b = bin(n)
@@ -131,9 +172,10 @@ if __name__ == "__main__":
         ip_network("192.168.2.0/24"),
         ip_network("192.168.3.0/24"),
     ]
-    """
+    
     prefixes1 = run_method1(prefixes)
     prefixes1_rev = run_method1_rev(prefixes)
+    prefixes_ll = run_method_linked_list(prefixes)
     prefixes2 = run_method2(prefixes)
 
     def print_prefixes(prefixes):
@@ -145,11 +187,16 @@ if __name__ == "__main__":
 
     print("After merge method 1:")
     print_prefixes(prefixes1)
-    print("After merge method 1_rev:")
-    print_prefixes(prefixes1_rev)
-    print("After merge method 2:")
-    print_prefixes(prefixes2)"""
 
+    print("After merge method 1 with reverse loop:")
+    print_prefixes(prefixes1_rev)
+
+    print("After merge using linked list:")
+    print_prefixes(prefixes_ll)
+
+    print("After merge method 2:")
+    print_prefixes(prefixes2)
+    
     # Add lots of prefixes for profiling
     prefixes.extend(ip_network('10.0.0.0/20').subnets(prefixlen_diff=10))
     prefixes.extend(ip_network('10.1.0.0/20').subnets(prefixlen_diff=10))
@@ -160,9 +207,11 @@ if __name__ == "__main__":
     prefixes.extend(ip_network('10.6.0.0/20').subnets(prefixlen_diff=10))
     prefixes.extend(ip_network('10.7.0.0/20').subnets(prefixlen_diff=10))
 
-    # Wow, method2 is about 4x faster than method1.
-    cProfile.run('run_method1(prefixes)')    
-    cProfile.run('run_method2(prefixes)')
-    # Reverse loop doesn't make a big difference.
-    cProfile.run('run_method1_rev(prefixes)')
-
+    # Wow, method2 is about 4x faster than method1. Reverse loop doesn't
+    # make a big difference (somewhat expected). Linked list is better,
+    # but still not as good as method2.
+    #cProfile.run('run_method1(prefixes)', sort='tottime')    
+    #cProfile.run('run_method2(prefixes)', sort='tottime')
+    #cProfile.run('run_method1_rev(prefixes)', sort='tottime')
+    #cProfile.run('run_method_linked_list(prefixes)', sort='tottime')
+    
