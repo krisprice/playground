@@ -1,116 +1,76 @@
 """Prototyping methods for aggregating IP prefixes, which is basically
 aggregating integer intervals with some special bounds. I'm using the
 standard Python ipaddress library that gives us IP address types with
-support comparisons, conversion, etc. Such types usually exist in some
-useful form in most languages. Just prototyping with IPv4 only."""
+support for comparisons, conversions, etc. Such types usually exist in
+some useful form in most languages. Just prototyping with IPv4 only."""
 
 from ipaddress import *
 import cProfile
 
-def run_method1(prefixes):
+def run_method1(prefixes, reduce_func):
     """Sort the list in order from lowest to highest network address and
-    shortest to longest prefix length. For each prefix in the list, scan
-    forward merging as many subsequent prefixes as possible. Delete the
-    prefixes that are merged. Repeat this process until the list stops
-    getting smaller. This does need to waste a whole iteration just to
-    verify we can't merge anymore prefixes."""
+    shortest to longest prefix length. Run a reduction function. Repeat
+    this until the list stops getting smaller. This does need to waste a
+    whole iteration just to verify we can't reduce the list anymore."""
 
     # Take a copy, so we don't modify the original.
     prefixes = sorted(prefixes)
-
+    
     prev_len = 0
     while len(prefixes) != prev_len:
         prev_len = len(prefixes)
-        
-        i = 0
-        while i < len(prefixes): # Should replace this with an i, p = enumerate(prefixes)?
-            p = prefixes[i]      # See next method, would it also be better to work backwards
-                                 # in this loop?
-
-            while i+1 < len(prefixes):
-                next_p = prefixes[i+1]
-
-                if p.broadcast_address >= next_p.broadcast_address:
-                    del prefixes[i+1]
-                elif p.broadcast_address+1 >= next_p.network_address and p.supernet().broadcast_address == next_p.broadcast_address:
-                    prefixes[i] = p = p.supernet()
-                    del prefixes[i+1]
-                else:
-                    break
-            i+=1
+        prefixes = reduce_func(prefixes)
+    
     return prefixes
 
-def run_method1_rev(prefixes):
-    """Try going the reverse direction through the list so we aren't
-    deleting elements from the begining. This won't save much, but if
-    the last prefix is large we save a small amount of work moving items
-    in the list."""
+def reduce_prefixes1(prefixes):
+    """For each prefix in the list, scan forward merging as many
+    subsequent prefixes as possible. Delete the prefixes that are
+    merged."""
 
-    # Take a copy, so we don't modify the original.
-    prefixes = sorted(prefixes, reverse=True)
+    i = 0
+    while i < len(prefixes): # Should replace this with an i, p = enumerate(prefixes)?
+        p = prefixes[i]      # See next method, would it also be better to work backwards
+                                # in this loop?
 
-    prev_len = 0
-    while len(prefixes) != prev_len:
-        prev_len = len(prefixes)
-        
-        i = len(prefixes)-1
-        while i >= 1:
-            p = prefixes[i]
-            next_p = prefixes[i-1]
+        while i+1 < len(prefixes):
+            next_p = prefixes[i+1]
 
             if p.broadcast_address >= next_p.broadcast_address:
-                prefixes[i-1] = prefixes[i] # If we change the sort to largest to smallest address and shortest to longest prefix
-                                            # we could do away with this copy couldn't we?
-                del prefixes[i]
+                del prefixes[i+1]
             elif p.broadcast_address+1 >= next_p.network_address and p.supernet().broadcast_address == next_p.broadcast_address:
-                prefixes[i-1] = p.supernet()
-                del prefixes[i]
-            i-=1
+                prefixes[i] = p = p.supernet()
+                del prefixes[i+1]
+            else:
+                break
+        i+=1
     return prefixes
 
-from collections import deque
+def reduce_prefixes1_reverse_loop(prefixes):
+    """Go in the reverse direction. If the first prefix is very large we
+    save some work by not moving all the items in the list while merging
+    this prefix. This won't be very significant."""
 
-def reduce_prefixes_deque(prefixes):
-    """Expects input prefixes to be a sorted deque. Consumes the input.
-    Returns a new sorted deque as the result."""
-
-    merged = deque()
-    p = prefixes.popleft()
-    pp = p.supernet()
+    prefixes.reverse()
     
-    while prefixes:
-        next_p = prefixes.popleft()
+    i = len(prefixes)-1
+    while i >= 1:
+        p = prefixes[i]
+        next_p = prefixes[i-1]
+
         if p.broadcast_address >= next_p.broadcast_address:
-            continue
-        elif p.broadcast_address+1 >= next_p.network_address and pp.broadcast_address == next_p.broadcast_address:
-            p = pp
-        else:
-            merged.append(p)
-            p = next_p
-            pp = p.supernet()
+            prefixes[i-1] = prefixes[i] # If we change the sort to largest to smallest address and shortest to longest prefix
+                                        # we could do away with this copy couldn't we?
+            del prefixes[i]
+        elif p.broadcast_address+1 >= next_p.network_address and p.supernet().broadcast_address == next_p.broadcast_address:
+            prefixes[i-1] = p.supernet()
+            del prefixes[i]
+        i-=1
     
-    merged.append(p)
-    return merged
-
-def run_method_deque(prefixes):
-    """Using a linked list should be faster because we're deleting items
-    in the middle of the list a lot. There isn't a pure linked list in
-    Python so I'm using a deque which is backed by one. Doing it naively
-    with indexes doesn't work well because deque seems to scan through
-    the list. Working with regular style of linked list using pointers is
-    ideally what we want, but in lieu of that we have this implementation
-    which consumes one deque to build the next."""
-    prefixes = deque(sorted(prefixes))
-    
-    prev_len = 0
-    while len(prefixes) != prev_len:
-        prev_len = len(prefixes)
-        prefixes = reduce_prefixes_deque(prefixes)
-    
+    prefixes.reverse()
     return prefixes
 
-
-def reduce_prefixes_list(prefixes):
+def reduce_prefixes1_consume_list(prefixes):
     """Expects input prefixes to be a sorted list. Consumes the input.
     Returns a new sorted list as the result."""
     
@@ -133,21 +93,47 @@ def reduce_prefixes_list(prefixes):
     merged.append(p)
     return merged
 
-def run_method1_list(prefixes):
-    """Then again, if we're not really able to use a proper linked list
-    to delete items in the middle, and we're just consuming the input
-    list to generate a new list on each pass, using plain old lists is
-    probably faster for that. Reverse the sort so we can pop() off the
-    end of the list as we go."""
+from collections import deque
 
-    prefixes = sorted(prefixes) # Take a copy
+def run_method1_deque(prefixes):
+    """See reduce_prefixes1_deque()"""
+    prefixes = deque(sorted(prefixes))
     
     prev_len = 0
     while len(prefixes) != prev_len:
         prev_len = len(prefixes)
-        prefixes = reduce_prefixes_list(prefixes)
+        prefixes = reduce_prefixes1_deque(prefixes)
     
     return prefixes
+
+def reduce_prefixes1_deque(prefixes):
+    """In the first two we are modifying the list by deleting items in
+    the middle. This presumably forces a lot of memcpy work inside the
+    list. Using a linked list should be faster. Python doesn't have a
+    native linked list so we're using a deque which is backed by one.
+    Deleting items in the deque using indexes doesn't work well because
+    deque seems to scan through the list. Working with regular style of
+    linked list using pointers is ideally what we want. But in lieu of
+    that we consume the input, and create a new deque of the output.
+    This effectively becomes reduce_prefixes1_consume_list() above."""
+
+    merged = deque()
+    p = prefixes.popleft()
+    pp = p.supernet()
+    
+    while prefixes:
+        next_p = prefixes.popleft()
+        if p.broadcast_address >= next_p.broadcast_address:
+            continue
+        elif p.broadcast_address+1 >= next_p.network_address and pp.broadcast_address == next_p.broadcast_address:
+            p = pp
+        else:
+            merged.append(p)
+            p = next_p
+            pp = p.supernet()
+    
+    merged.append(p)
+    return merged
 
 def trailing_zeros(n):
     b = bin(n)
@@ -213,12 +199,6 @@ if __name__ == "__main__":
         ip_network("192.168.3.0/24"),
     ]
     
-    prefixes1 = run_method1(prefixes)
-    prefixes1_rev = run_method1_rev(prefixes)
-    prefixes_deque = run_method_deque(prefixes)
-    prefixes1_list = run_method1_list(prefixes)
-    prefixes2 = run_method2(prefixes)
-
     def print_prefixes(prefixes):
         for p in sorted(prefixes):
             print("\t{}".format(p))
@@ -226,21 +206,21 @@ if __name__ == "__main__":
     print("Before merging:")
     print_prefixes(prefixes)
 
-    print("After merge method 1:")
-    print_prefixes(prefixes1)
-
-    print("After merge method 1 with reverse loop:")
-    print_prefixes(prefixes1_rev)
-
-    print("After merge using linked list:")
-    print_prefixes(prefixes_deque)
-
-    print("After merge method 1 using list:")
-    print_prefixes(prefixes1_list)
-
-    print("After merge method 2:")
-    print_prefixes(prefixes2)
+    print("reduce_prefixes1():")
+    print_prefixes(run_method1(prefixes, reduce_prefixes1))
     
+    print("reduce_prefixes1_reverse_loop():")
+    print_prefixes(run_method1(prefixes, reduce_prefixes1_reverse_loop))
+
+    print("reduce_prefixes1_consume_list():")
+    print_prefixes(run_method1(prefixes, reduce_prefixes1_consume_list))
+
+    print("reduce_prefixes1_deque():")
+    print_prefixes(run_method1_deque(prefixes))
+
+    print("run_method2():")
+    print_prefixes(run_method2(prefixes))
+
     # Add lots of prefixes for profiling
     prefixes.extend(ip_network('10.0.0.0/20').subnets(prefixlen_diff=10))
     prefixes.extend(ip_network('10.1.0.0/20').subnets(prefixlen_diff=10))
@@ -253,10 +233,12 @@ if __name__ == "__main__":
 
     # Wow, method2 is about 4x faster than method1. Reverse loop doesn't
     # make a big difference (somewhat expected). Linked list is better,
-    # but still not as good as method2.
-    #cProfile.run('run_method1(prefixes)', sort='tottime')    
+    # but still not as good as method2. Consume list is the best version
+    # of method1.
+
+    #cProfile.run('run_method1(prefixes, reduce_prefixes1)', sort='tottime')    
     #cProfile.run('run_method2(prefixes)', sort='tottime')
-    #cProfile.run('run_method1_rev(prefixes)', sort='tottime')
-    #cProfile.run('run_method_deque(prefixes)', sort='tottime')
-    #cProfile.run('run_method1_list(prefixes)', sort='tottime')
+    #cProfile.run('run_method1(prefixes, reduce_prefixes1_reverse_loop)', sort='tottime')
+    #cProfile.run('run_method1_deque(prefixes)', sort='tottime')
+    #cProfile.run('run_method1(prefixes, reduce_prefixes1_consume_list)', sort='tottime')
     
