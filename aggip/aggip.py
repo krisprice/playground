@@ -135,54 +135,60 @@ def reduce_prefixes1_deque(prefixes):
     merged.append(p)
     return merged
 
+from heapq import *
+
+def run_method1_heapq(prefixes):
+    """See reduce_prefixes1_heap()"""
+    prefixes = prefixes.heapify(list(prefixes))
+    
+    prev_len = 0
+    while len(prefixes) != prev_len:
+        prev_len = len(prefixes)
+        prefixes = reduce_prefixes1_heapq(prefixes)
+    
+    return prefixes
+
 def trailing_zeros(n):
     b = bin(n)
     r = len(b) - len(b.rstrip('0'))
     return r
 
 def get_first_subnet(start, end):
+    l = 32 if start.version == 4 else 128
     r = int(end) - int(start)
     n = r.bit_length()-1
-    num_bits = min(n, trailing_zeros(int(start)))
-    return ip_network(start).supernet(new_prefix=32-num_bits)
+    num_bits = l - min(n, trailing_zeros(int(start)))
+    return ip_network(start).supernet(new_prefix=num_bits)
 
-def ip_address_interval_to_subnets(start, end):
-    subnets = []
+def coalesce_intervals(intervals):
+    """Reduce a list of intervals by merging them if they overlap.
+    Expects the input to be sorted. Output as a generator."""
+    
+    start, end = intervals[0]
+    for next_start, next_end in intervals:
+        if end >= next_start:
+            start, end = (min(start, next_start), max(end, next_end))
+        else:
+            yield start, end
+            start = next_start
+            end = next_end
+    yield start, end
+
+def ipaddress_interval_to_subnets(start, end):
+    """Expects inputs to be ipaddress objects. Output as a generator."""
     new_start = start
     while (new_start < end):
         subnet = get_first_subnet(new_start, end)
         new_start = subnet.broadcast_address+1
-        subnets.append(subnet)
-    return subnets
+        yield subnet
 
 def run_method2(prefixes):
     """We will treat the prefixes as integer intervals. Merge these
     intervals regardless of valid network boundaries. Then in split
     these merged intervals up into valid networks."""
-    
-    # Take a copy, so we don't modify the original. Note the increment
-    # of the broadcast address is important as we treat an interval as
-    # 'a <= x < b'. Would it would be better to treat an interval as
-    # 'a <= x <= b' everywhere instead?
-    intervals = [(p.network_address, p.broadcast_address+1) for p in sorted(prefixes)]
 
-    i = 0
-    while i < len(intervals)-1:
-        (p1_start, p1_end) = intervals[i]
-        (p2_start, p2_end) = intervals[i+1]
-
-        if p1_end+1 >= p2_start:
-            intervals[i+1] = (min(p1_start, p2_start), max(p1_end, p2_end))
-            del intervals[i] # Would reversing this loop and deleting from end rather than front be nicer?
-            continue         # It would avoid having to use this continue also (I think?).
-                             # And len(intervals) in the while condition wouldn't change every loop.
-        i+=1
-    
-    final_intervals = []
-    for (start, end) in intervals:
-        subnets = ip_address_interval_to_subnets(start, end)
-        final_intervals.extend(subnets)
-    return final_intervals
+    intervals = coalesce_intervals([(p.network_address, p.broadcast_address+1) for p in sorted(prefixes)])
+    return [n for l in map(lambda i: ipaddress_interval_to_subnets(*i), intervals) for n in l]
 
 if __name__ == "__main__":
     prefixes = [
@@ -221,6 +227,7 @@ if __name__ == "__main__":
     print("run_method2():")
     print_prefixes(run_method2(prefixes))
 
+
     # Add lots of prefixes for profiling
     prefixes.extend(ip_network('10.0.0.0/20').subnets(prefixlen_diff=10))
     prefixes.extend(ip_network('10.1.0.0/20').subnets(prefixlen_diff=10))
@@ -235,10 +242,9 @@ if __name__ == "__main__":
     # make a big difference (somewhat expected). Linked list is better,
     # but still not as good as method2. Consume list is the best version
     # of method1.
-
-    #cProfile.run('run_method1(prefixes, reduce_prefixes1)', sort='tottime')    
+    #cProfile.run('run_method1(prefixes, reduce_prefixes1_consume_list)', sort='tottime')
     #cProfile.run('run_method2(prefixes)', sort='tottime')
+    #cProfile.run('run_method1(prefixes, reduce_prefixes1)', sort='tottime')   
     #cProfile.run('run_method1(prefixes, reduce_prefixes1_reverse_loop)', sort='tottime')
     #cProfile.run('run_method1_deque(prefixes)', sort='tottime')
-    #cProfile.run('run_method1(prefixes, reduce_prefixes1_consume_list)', sort='tottime')
     
