@@ -135,19 +135,6 @@ def reduce_prefixes1_deque(prefixes):
     merged.append(p)
     return merged
 
-from heapq import *
-
-def run_method1_heapq(prefixes):
-    """See reduce_prefixes1_heap()"""
-    prefixes = prefixes.heapify(list(prefixes))
-    
-    prev_len = 0
-    while len(prefixes) != prev_len:
-        prev_len = len(prefixes)
-        prefixes = reduce_prefixes1_heapq(prefixes)
-    
-    return prefixes
-
 def trailing_zeros(n):
     b = bin(n)
     r = len(b) - len(b.rstrip('0'))
@@ -227,7 +214,6 @@ if __name__ == "__main__":
     print("run_method2():")
     print_prefixes(run_method2(prefixes))
 
-
     # Add lots of prefixes for profiling
     prefixes.extend(ip_network('10.0.0.0/20').subnets(prefixlen_diff=10))
     prefixes.extend(ip_network('10.1.0.0/20').subnets(prefixlen_diff=10))
@@ -243,7 +229,7 @@ if __name__ == "__main__":
     # but still not as good as method2. Consume list is the best version
     # of method1.
     #cProfile.run('run_method1(prefixes, reduce_prefixes1_consume_list)', sort='tottime')
-    #cProfile.run('run_method2(prefixes)', sort='tottime')
+    #cProfile.run('run_method2(prefixes)', sort='tottime')    
     #cProfile.run('run_method1(prefixes, reduce_prefixes1)', sort='tottime')   
     #cProfile.run('run_method1(prefixes, reduce_prefixes1_reverse_loop)', sort='tottime')
     #cProfile.run('run_method1_deque(prefixes)', sort='tottime')

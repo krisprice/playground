@@ -1,0 +1,6 @@
+[package]
+name = "double_u64_counter"
+version = "0.1.0"
+authors = ["Kris Price <kris@krisprice.nz>"]
+
+[dependencies]
