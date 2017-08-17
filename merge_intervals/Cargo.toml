@@ -1,0 +1,7 @@
+[package]
+name = "merge_intervals"
+version = "0.1.0"
+authors = ["Kris Price <kris@krisprice.nz>"]
+
+[dependencies]
+itertools = "0.6.1"
