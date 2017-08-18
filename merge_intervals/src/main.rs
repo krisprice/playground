@@ -1,67 +1,59 @@
-#![allow(unused_mut)]
-#![allow(unused_variables)]
 extern crate itertools;
+use itertools::Itertools;
+use std::cmp::{Ord, min, max};
 
-fn merge_intervals1() {
-    let v = vec![
-        (0, 1), (1, 2), (2, 3), // should merge to (0, 3)
-        (11, 12), (13, 14), (10, 15), (11, 13), // should merge to (10, 15)
-        (20, 25), (24, 29) // should merge to (20, 29)
-    ];
-
-    let mut intervals = v.clone();
-
+fn merge_intervals<T: Copy + Ord>(mut intervals: Vec<(T, T)>) -> Vec<(T, T)> {
     // Sort by (end, start) because we work backwards below.
     intervals.sort_by_key(|k| (k.1, k.0)); 
-    
-    println!("Before: {:?}", v);
-    println!("Sorted: {:?}", intervals);
 
     // Work backwards from the end of the list to the front.
     let mut i = intervals.len()-1;
     while i >= 1 {
-        // It would be nice to take l_start and l_end as references here
-        // instead of indexing into intervals[] to update them. But this
-        // would mean we can't do intervals.remove().
         let (l_start, l_end) = intervals[i-1];
         let (r_start, r_end) = intervals[i];
         
         if r_start <= l_end {
-            intervals[i-1].0 = std::cmp::min(l_start, r_start);
-            intervals[i-1].1 = std::cmp::max(l_end, r_end);
+            intervals[i-1].0 = min(l_start, r_start);
+            intervals[i-1].1 = max(l_end, r_end);
             intervals.remove(i);
         }
-
         i -= 1;
     }
-
-    println!("After: {:?}", intervals);
+    intervals
 }
 
-fn merge_intervals2() {
+fn merge_intervals_itertools(mut intervals: Vec<(u32, u32)>) -> Vec<(u32, u32)> {
+    intervals.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| b.1.cmp(&a.1)));
+
+    let merged = intervals.into_iter().coalesce(|a, b|
+        if a.1 >= b.0 { Ok((a.0, max(a.1, b.1))) }
+        else { Err((a, b)) }
+    ).collect::<Vec<(u32, u32)>>();
+
+    merged
+}
+
+fn main() {
     let v = vec![
         (0, 1), (1, 2), (2, 3), // should merge to (0, 3)
         (11, 12), (13, 14), (10, 15), (11, 13), // should merge to (10, 15)
         (20, 25), (24, 29) // should merge to (20, 29)
     ];
 
-    let mut intervals = v.clone();
-    intervals.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| b.1.cmp(&a.1)));
-
     println!("Before: {:?}", v);
-    println!("Sorted: {:?}", intervals);
 
-    use itertools::Itertools;
+    let intervals = merge_intervals(v.clone());
+    println!("After: {:?}", intervals);
 
-    let merged = intervals.into_iter().coalesce(|a, b|
-        if a.1 >= b.0 { Ok((a.0, std::cmp::max(a.1, b.1))) }
-        else { Err((a, b)) }
-    ).collect::<Vec<(i64, i64)>>();
+    let intervals = merge_intervals_itertools(v.clone());
+    println!("After: {:?}", intervals);
 
-    println!("After: {:?}", merged);
-}
+    let vv = vec![
+        ([0, 1], [0, 2]), ([0, 2], [0, 3]), ([0, 0], [0, 1]),
+        ([10, 15], [11, 0]), ([10, 0], [10, 16])
+    ];
 
-fn main() {
-    merge_intervals1();
-    merge_intervals2();
+    println!("Before: {:?}", vv);
+    let intervals = merge_intervals(vv.clone());
+    println!("After: {:?}", intervals);
 }
