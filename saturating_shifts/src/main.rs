@@ -33,8 +33,8 @@ macro_rules! saturating_shl_impl {
             type Output = $t;
 
             #[inline]
-            fn saturating_shl(self, other: $f) -> $t {
-                if other < $w { self << other } else { 0 }
+            fn saturating_shl(self, rhs: $f) -> $t {
+                if rhs < $w { self << rhs } else { 0 }
             }
         }
     )
@@ -51,8 +51,8 @@ macro_rules! saturating_shr_impl {
             type Output = $t;
 
             #[inline]
-            fn saturating_shr(self, other: $f) -> $t {
-                if other < $w { self >> other } else { 0 }
+            fn saturating_shr(self, rhs: $f) -> $t {
+                if rhs < $w { self >> rhs } else { 0 }
             }
         }
     )
