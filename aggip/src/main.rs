@@ -31,6 +31,9 @@ fn main() {
     print_ipnet_vec(&ipv6nets);
 
     println!("\nAfter aggregation:");
-    print_ipnet_vec(&aggregate_ipv4_networks(&ipv4nets));
-    print_ipnet_vec(&aggregate_ipv6_networks(&ipv6nets));
+    print_ipnet_vec(&Ipv4Net::aggregate(&ipv4nets));
+    print_ipnet_vec(&Ipv6Net::aggregate(&ipv6nets));
+
+    let ip = ipv4nets[2];
+    println!("{:?}", ip.subnets(28));
 }
