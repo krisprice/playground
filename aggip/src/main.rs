@@ -31,9 +31,18 @@ fn main() {
     print_ipnet_vec(&ipv6nets);
 
     println!("\nAfter aggregation:");
+    print_ipnet_vec(&IpNet::aggregate(&ipnets));
     print_ipnet_vec(&Ipv4Net::aggregate(&ipv4nets));
     print_ipnet_vec(&Ipv6Net::aggregate(&ipv6nets));
 
-    let ip = ipv4nets[2];
-    println!("{:?}", ip.subnets(28));
+    //let ip = ipv4nets[2];
+    //println!("{:?}", ip.subnets(28));
+    
+    let a = Ipv6Addr::from_str("fd00::1").unwrap();
+    let u = Emu128 { hi: 0xfd00_0000_0000_0000, lo: 1 };
+    let a2: Ipv6Addr = u.into();
+
+    assert_eq!(a, a2);
+    assert_eq!(u, a.into());
+    assert_eq!(u, Emu128::from(a));
 }
