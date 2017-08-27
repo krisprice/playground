@@ -1,12 +1,13 @@
+#![feature(step_trait)]
+use std::fmt::Display;
+//use std::net::{Ipv4Addr, Ipv6Addr};
 use std::option::Option::{Some, None};
-use std::net::{Ipv4Addr, Ipv6Addr};
 use std::str::FromStr;
 
 // Created external crate for IpNet types and moved everything there.
 extern crate ipnet;
 use ipnet::*;
 
-use std::fmt::Display;
 fn print_ipnet_vec<T: Display>(networks: &Vec<T>) {
     for n in networks {
         println!("{}", n);
@@ -66,10 +67,10 @@ fn main() {
     // Range and Step are not stable so stick with custom iterator until
     // they are
 
-    use std::ops::Range;
+    //use std::ops::Range;
 
-    let r = 1..5;
-    println!("{} {}", r.start, r.end);
+    //let r = 1..5;
+    //println!("{} {}", r.start, r.end);
 
     /*let mut r = Range {
         start: Ipv4Addr::from_str("10.1.1.1").unwrap(),
@@ -80,31 +81,4 @@ fn main() {
         println!("{}", i);
     }*/
     
-    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
-    struct NewType(u32);
-
-    // I get the 
-    impl std::ops::Add for NewType {
-        type Output = NewType;
-        fn add(self, other: NewType) -> NewType {
-            NewType(self.0 + other.0)
-        }
-    }
-
-    // This is marked nightly-only and so generates the "error: use of
-    // unstable library feature 'step_trait': likely to be replaced by
-    // finer-grained traits (see issue #42168)." Yet I can use other
-    // Ranges (e.g. just doing 1..5) that also must've implemented
-    // this trait. How come those are allowed?
-    //impl std::iter::Step for NewType {
-        // ...
-    //}
-
-    let a = NewType(10);
-    let b = NewType(20);
-
-    for i in a..b {
-        println!("{:?}", i);
-    }
-
 }
