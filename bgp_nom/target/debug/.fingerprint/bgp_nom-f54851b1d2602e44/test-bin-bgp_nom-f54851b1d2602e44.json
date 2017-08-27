@@ -1,1 +1,0 @@
-{"rustc":12342400666247092573,"features":"[]","target":8676602889953855228,"profile":3756675567829990309,"deps":[["byteorder v1.0.0",2251293748239837747],["nom v3.1.0",16694930185788035834]],"local":{"MtimeBased":[[1499486638,833890900],"/mnt/c/code/bgp_nom/target/debug/.fingerprint/bgp_nom-f54851b1d2602e44/dep-test-bin-bgp_nom-f54851b1d2602e44"]},"rustflags":[]}
