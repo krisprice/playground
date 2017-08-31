@@ -1,12 +1,10 @@
-#![feature(step_trait)]
 use std::fmt::Display;
-//use std::net::{Ipv4Addr, Ipv6Addr};
 use std::option::Option::{Some, None};
 use std::str::FromStr;
 
 // Created external crate for IpNet types and moved everything there.
 extern crate ipnet;
-use ipnet::*;
+use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 
 fn print_ipnet_vec<T: Display>(networks: &Vec<T>) {
     for n in networks {
@@ -28,57 +26,18 @@ fn main() {
     let ipv6nets: Vec<Ipv6Net> = ipnets.iter().filter_map(|p| if let IpNet::V6(x) = *p { Some(x) } else { None }).collect();
 
     println!("Before aggregation:");
+    println!("\nCombined list:");
+    print_ipnet_vec(&ipnets);
+    println!("\nIPv4 only list:");
     print_ipnet_vec(&ipv4nets);
+    println!("\nIPv6 only list:");
     print_ipnet_vec(&ipv6nets);
 
     println!("\nAfter aggregation:");
+    println!("\nCombined list:");
     print_ipnet_vec(&IpNet::aggregate(&ipnets));
+    println!("\nIPv4 only list:");
     print_ipnet_vec(&Ipv4Net::aggregate(&ipv4nets));
+    println!("\nIPv6 only list:");
     print_ipnet_vec(&Ipv6Net::aggregate(&ipv6nets));
-
-    // Test subnets iterator
-    /*let v: Vec<Ipv4Net> = Ipv4Net::from_str("10.1.1.0/24").unwrap().new_subnets(26).into_iter().collect();
-    println!("{:?}", v);
-
-    let i = Ipv4Net::from_str("10.1.1.0/24").unwrap().new_subnets(8);
-    for ip in i {
-        println!("{}", ip);
-    }
-    let i = Ipv6Net::from_str("fd00::/16").unwrap().new_subnets(18);
-    for ip in i {
-        println!("{}", ip);
-    }
-    let h = Ipv4Net::from_str("10.1.1.0/24").unwrap().hosts();
-    for ip in h {
-        println!("{}", ip);
-    }
-
-    let h = Ipv6Net::from_str("fd00::/125").unwrap().hosts();
-    for ip in h {
-        println!("{}", ip);
-    }*/
-
-
-    // TODO:
-    // * impl Range for Emu128 as a test
-    // * Create a custom IpRange trait for requires IpAdd trait
-    // * Can the Range and step_by make sense for subnets()?
-    // would be good to have Add and Step impl for IpAddr so can use Range
-    // Range and Step are not stable so stick with custom iterator until
-    // they are
-
-    //use std::ops::Range;
-
-    //let r = 1..5;
-    //println!("{} {}", r.start, r.end);
-
-    /*let mut r = Range {
-        start: Ipv4Addr::from_str("10.1.1.1").unwrap(),
-        end: Ipv4Addr::from_str("10.1.1.20").unwrap(),
-    };
-
-    for i in r {
-        println!("{}", i);
-    }*/
-    
 }

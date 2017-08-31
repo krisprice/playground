@@ -5,4 +5,3 @@ authors = ["Kris Price <kris@krisprice.nz>"]
 
 [dependencies]
 ipnet = { path = "../../ipnet" }
-itertools = "0.6.1"
