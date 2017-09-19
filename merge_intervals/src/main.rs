@@ -23,14 +23,13 @@ fn merge_intervals_backwards_remove<T: Copy + Ord>(mut intervals: Vec<(T, T)>) -
 }
 
 fn merge_intervals_backwards_copy<T: Copy + Ord>(mut intervals: Vec<(T, T)>) -> Vec<(T, T)> {
-    let mut res: Vec<(T, T)> = Vec::new();
-    
     if intervals.len() == 0 {
-        return res;
+        return intervals;
     }
 
     // Sort by (end, start) because we work backwards below.
     intervals.sort_by_key(|k| (k.1, k.0));
+    let mut res: Vec<(T, T)> = Vec::new();
     let (mut start, mut end) = intervals[intervals.len()-1];
 
     // Work backwards from the end of the list to the front.
@@ -69,13 +68,12 @@ fn merge_intervals_forwards_remove<T: Copy + Ord>(mut intervals: Vec<(T, T)>) ->
 }
 
 fn merge_intervals_forwards_copy<T: Copy + Ord>(mut intervals: Vec<(T, T)>) -> Vec<(T, T)> {
-    let mut res: Vec<(T, T)> = Vec::new();
-    
     if intervals.len() == 0 {
-        return res;
+        return intervals;
     }
-
+    
     intervals.sort();
+    let mut res: Vec<(T, T)> = Vec::new();
     let (mut start, mut end) = intervals[0];
     
     let mut i = 1;
@@ -100,13 +98,12 @@ fn merge_intervals_forwards_copy<T: Copy + Ord>(mut intervals: Vec<(T, T)>) -> V
 // As I did it in aggip.py for the generator style, but generators
 // aren't stable in Rust yet. This turned out to be the fastest.
 fn coalesce_intervals<T: Copy + Ord>(mut intervals: Vec<(T, T)>) -> Vec<(T, T)> {
-    let mut res: Vec<(T, T)> = Vec::new();
-    
     if intervals.len() == 0 {
-        return res;
+        return intervals;
     }
 
     intervals.sort(); 
+    let mut res: Vec<(T, T)> = Vec::new();
     let (mut start, mut end) = intervals[0];
     
     for (next_start, next_end) in intervals {
