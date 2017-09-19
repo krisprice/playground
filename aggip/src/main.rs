@@ -2,7 +2,8 @@ use std::fmt::Display;
 use std::option::Option::{Some, None};
 use std::str::FromStr;
 
-// Created external crate for IpNet types and moved everything there.
+// Created external crate for IpNet types and the aggregate method and
+// moved everything there.
 extern crate ipnet;
 use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 

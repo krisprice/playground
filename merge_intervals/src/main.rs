@@ -115,13 +115,12 @@ fn coalesce_intervals<T: Copy + Ord>(mut intervals: Vec<(T, T)>) -> Vec<(T, T)> 
             end = max(end, next_end);
         }
         else {
-            res.push((start, end)); // yield
+            res.push((start, end));
             start = next_start;
             end = next_end;
         }
     }
-
-    res.push((start, end)); // yield
+    res.push((start, end));
     res
 }
 
@@ -138,10 +137,11 @@ fn merge_intervals_itertools<T: Copy + Ord>(mut intervals: Vec<(T, T)>) -> Vec<(
 
 #[cfg(test)]
 mod tests {
-    use std::net::Ipv6Addr;
-    use super::*;
+    use std::convert::From;
+    use std::net::{Ipv4Addr, Ipv6Addr};
     use test::Bencher;
-
+    use super::*;
+    
     #[test]
     fn main_test() {       
         let v = vec![
@@ -185,6 +185,46 @@ mod tests {
         assert_eq!(merge_intervals_forwards_remove(vv.clone()), vv_ok);
         assert_eq!(coalesce_intervals(vv.clone()), vv_ok);
         assert_eq!(merge_intervals_itertools(vv.clone()), vv_ok);
+
+        let ip = vec![
+            (Ipv4Addr::from(0), Ipv4Addr::from(1)),
+            (Ipv4Addr::from(1), Ipv4Addr::from(2)),
+            (Ipv4Addr::from(2), Ipv4Addr::from(3)),
+        ];
+
+        let ip_ok = vec![
+            (Ipv4Addr::from(0), Ipv4Addr::from(3)),
+        ];
+
+        let mut ip_ok_rev = ip_ok.clone();
+        ip_ok_rev.reverse();
+
+        let ip6 = vec![
+            (Ipv6Addr::from(0), Ipv6Addr::from(1)),
+            (Ipv6Addr::from(1), Ipv6Addr::from(2)),
+            (Ipv6Addr::from(2), Ipv6Addr::from(3)),
+        ];
+
+        let ip6_ok = vec![
+            (Ipv6Addr::from(0), Ipv6Addr::from(3)),
+        ];
+
+        let mut ip6_ok_rev = ip6_ok.clone();
+        ip6_ok_rev.reverse();
+        
+        assert_eq!(merge_intervals_backwards_copy(ip.clone()), ip_ok_rev);
+        assert_eq!(merge_intervals_backwards_remove(ip.clone()), ip_ok);
+        assert_eq!(merge_intervals_forwards_copy(ip.clone()), ip_ok);
+        assert_eq!(merge_intervals_forwards_remove(ip.clone()), ip_ok);
+        assert_eq!(coalesce_intervals(ip.clone()), ip_ok);
+        assert_eq!(merge_intervals_itertools(ip.clone()), ip_ok);
+
+        assert_eq!(merge_intervals_backwards_copy(ip6.clone()), ip6_ok_rev);
+        assert_eq!(merge_intervals_backwards_remove(ip6.clone()), ip6_ok);
+        assert_eq!(merge_intervals_forwards_copy(ip6.clone()), ip6_ok);
+        assert_eq!(merge_intervals_forwards_remove(ip6.clone()), ip6_ok);
+        assert_eq!(coalesce_intervals(ip6.clone()), ip6_ok);
+        assert_eq!(merge_intervals_itertools(ip6.clone()), ip6_ok);
     }
 
     macro_rules! bench_merge_func {
@@ -211,6 +251,31 @@ mod tests {
     bench_merge_func!(bench_merge_intervals_fowards_copy_u32, merge_intervals_forwards_copy);
     bench_merge_func!(bench_coalesce_intervals_u32, coalesce_intervals);
     bench_merge_func!(bench_merge_intervals_itertools_u32, merge_intervals_itertools);
+
+    macro_rules! bench_merge_func_ipv4addr {
+        ($name:ident, $f:ident) => (
+            #[bench]
+            fn $name(b: &mut Bencher) {
+                let mut v: Vec<(Ipv4Addr, Ipv4Addr)> = Vec::new();
+                let mut last = Ipv4Addr::new(0, 0, 0, 0);
+                for x in 0u32..25u32 {
+                    for y in 0u32..25u32 {
+                        let ip = Ipv4Addr::from(x << 16 & y);
+                        v.push((last, ip));
+                        last = ip;
+                    }
+                }
+                b.iter(|| $f(v.clone()));
+            }
+        )
+    }
+
+    bench_merge_func_ipv4addr!(bench_merge_intervals_backwards_remove_ipv4addr, merge_intervals_backwards_remove);
+    bench_merge_func_ipv4addr!(bench_merge_intervals_forwards_remove_ipv4addr, merge_intervals_forwards_remove);
+    bench_merge_func_ipv4addr!(bench_merge_intervals_backwards_copy_ipv4addr, merge_intervals_backwards_copy);
+    bench_merge_func_ipv4addr!(bench_merge_intervals_fowards_copy_ipv4addr, merge_intervals_forwards_copy);
+    bench_merge_func_ipv4addr!(bench_coalesce_intervals_ipv4addr, coalesce_intervals);
+    bench_merge_func_ipv4addr!(bench_merge_intervals_itertools_ipv4addr, merge_intervals_itertools);
 
     macro_rules! bench_merge_func_ipv6addr {
         ($name:ident, $f:ident) => (
