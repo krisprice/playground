@@ -1,17 +1,6 @@
-use std::fmt::Display;
-use std::option::Option::{Some, None};
-use std::str::FromStr;
-
-// Created external crate for IpNet types and the aggregate method and
-// moved everything there.
+// Created external crate and moved all types and methods there.
 extern crate ipnet;
-use ipnet::{IpNet, Ipv4Net, Ipv6Net};
-
-fn print_ipnet_vec<T: Display>(networks: &Vec<T>) {
-    for n in networks {
-        println!("{}", n);
-    }
-}
+use ipnet::IpNet;
 
 fn main() {
     let strings = vec![
@@ -22,23 +11,17 @@ fn main() {
         "fd00::/32", "fd00:1::/32",
     ];
 
-    let ipnets: Vec<IpNet> = strings.iter().map(|p| IpNet::from_str(p).unwrap()).collect();
-    let ipv4nets: Vec<Ipv4Net> = ipnets.iter().filter_map(|p| if let IpNet::V4(x) = *p { Some(x) } else { None }).collect();
-    let ipv6nets: Vec<Ipv6Net> = ipnets.iter().filter_map(|p| if let IpNet::V6(x) = *p { Some(x) } else { None }).collect();
-
-    println!("Before aggregation:");
-    println!("\nCombined list:");
-    print_ipnet_vec(&ipnets);
-    println!("\nIPv4 only list:");
-    print_ipnet_vec(&ipv4nets);
-    println!("\nIPv6 only list:");
-    print_ipnet_vec(&ipv6nets);
-
-    println!("\nAfter aggregation:");
-    println!("\nCombined list:");
-    print_ipnet_vec(&IpNet::aggregate(&ipnets));
-    println!("\nIPv4 only list:");
-    print_ipnet_vec(&Ipv4Net::aggregate(&ipv4nets));
-    println!("\nIPv6 only list:");
-    print_ipnet_vec(&Ipv6Net::aggregate(&ipv6nets));
+    let ipnets: Vec<IpNet> = strings.iter().filter_map(|p| p.parse().ok()).collect();
+    
+    println!("\nInput IP prefix list:");
+    
+    for n in &ipnets {
+        println!("{}", n);
+    }
+    
+    println!("\nAggregated IP prefixes:");
+    
+    for n in IpNet::aggregate(&ipnets) {
+        println!("{}", n);
+    }
 }
